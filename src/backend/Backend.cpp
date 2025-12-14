@@ -3,6 +3,7 @@
 #include <aquamarine/backend/Headless.hpp>
 #include <aquamarine/backend/DRM.hpp>
 #include <aquamarine/backend/Null.hpp>
+#include <aquamarine/backend/Tab.hpp>
 #include <aquamarine/allocator/GBM.hpp>
 #include <ranges>
 #include <sys/timerfd.h>
@@ -38,6 +39,7 @@ static const char* backendTypeToName(eBackendType type) {
         case AQ_BACKEND_DRM: return "drm";
         case AQ_BACKEND_HEADLESS: return "headless";
         case AQ_BACKEND_WAYLAND: return "wayland";
+        case AQ_BACKEND_TAB: return "tab";
         default: break;
     }
     return "invalid";
@@ -93,6 +95,10 @@ Hyprutils::Memory::CSharedPointer<CBackend> Aquamarine::CBackend::create(const s
             ref->self = ref;
         } else if (b.backendType == AQ_BACKEND_NULL) {
             auto ref = SP<CNullBackend>(new CNullBackend(backend));
+            backend->implementations.emplace_back(ref);
+            ref->self = ref;
+        } else if (b.backendType == AQ_BACKEND_TAB) {
+            auto ref = SP<CTabBackend>(new CTabBackend(backend));
             backend->implementations.emplace_back(ref);
             ref->self = ref;
         } else {

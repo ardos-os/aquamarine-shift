@@ -21,6 +21,15 @@ set(LIBDIR ${CMAKE_INSTALL_FULL_LIBDIR})
 find_package(PkgConfig REQUIRED)
 find_package(OpenGL REQUIRED COMPONENTS "GLES3")
 find_package(hyprwayland-scanner 0.4.0 REQUIRED)
+
+# Tab client library (from shift/tab-client)
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/shift/tab-client/cmake")
+find_package(TabClient)
+
+# Build tab-client if found
+if(TabClient_FOUND)
+  tab_client_add_build_target(tab_client_build)
+endif()
 pkg_check_modules(
   deps
   REQUIRED
@@ -36,6 +45,10 @@ pkg_check_modules(
   libudev
   libdisplay-info
   hwdata)
+
+if(TabClient_FOUND)
+  add_compile_definitions(AQUAMARINE_TAB_BACKEND)
+endif()
 
 configure_file(aquamarine.pc.in aquamarine.pc @ONLY)
 
@@ -67,7 +80,12 @@ target_include_directories(
   PRIVATE "./src" "./src/include" "./protocols" "${CMAKE_BINARY_DIR}")
 set_target_properties(aquamarine PROPERTIES VERSION ${AQUAMARINE_VERSION}
                                             SOVERSION 9)
-target_link_libraries(aquamarine OpenGL::EGL OpenGL::OpenGL PkgConfig::deps)
+target_link_libraries(aquamarine PUBLIC OpenGL::EGL OpenGL::OpenGL PkgConfig::deps)
+
+if(TabClient_FOUND)
+  add_dependencies(aquamarine tab_client_build)
+  target_link_libraries(aquamarine PRIVATE TabClient::TabClient)
+endif()
 
 check_include_file("sys/timerfd.h" HAS_TIMERFD)
 pkg_check_modules(epoll IMPORTED_TARGET epoll-shim)

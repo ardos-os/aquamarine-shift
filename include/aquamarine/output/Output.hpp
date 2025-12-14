@@ -15,6 +15,7 @@
 namespace Aquamarine {
 
     class IBackendImplementation;
+    class CTabOutput;
 
     struct SOutputMode {
         Hyprutils::Math::Vector2D      pixelSize;
@@ -111,6 +112,7 @@ namespace Aquamarine {
         friend class CWaylandOutput;
         friend class CDRMOutput;
         friend class CHeadlessOutput;
+        friend class CTabOutput;
     };
 
     class IOutput {
