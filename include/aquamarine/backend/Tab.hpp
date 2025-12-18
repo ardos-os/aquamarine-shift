@@ -72,6 +72,7 @@ namespace Aquamarine {
         Hyprutils::Memory::CSharedPointer<IPointer>                    m_pPointer;
         Hyprutils::Memory::CSharedPointer<ITouch>                      m_pTouch;
         Hyprutils::Memory::CSharedPointer<ITablet>                     m_pTablet;
+        Hyprutils::Memory::CSharedPointer<ITabletPad>                  m_pTabletPad;
         Hyprutils::Memory::CSharedPointer<ISwitch>                     m_pSwitch;
 
         size_t                                                         outputIDCounter = 0;

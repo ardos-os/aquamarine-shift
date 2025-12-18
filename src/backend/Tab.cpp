@@ -104,6 +104,22 @@ class CTabTablet : public ITablet {
     }
 };
 
+class CTabTabletPad : public ITabletPad {
+  public:
+    CTabTabletPad() {
+        ;
+    }
+
+    virtual const std::string& getName() {
+        static const std::string name = "tab-tablet-pad";
+        return name;
+    }
+
+    virtual libinput_device* getLibinputHandle() {
+        return nullptr;
+    }
+};
+
 class CTabSwitch : public ISwitch {
   public:
     CTabSwitch() {
@@ -566,6 +582,242 @@ void Aquamarine::CTabBackend::handleInput(TabInputEvent* event,
             });
             break;
         }
+        case TAB_INPUT_KIND_POINTER_MOTION_ABSOLUTE: {
+            if (!m_pPointer) {
+                m_pPointer = SP<CTabPointer>(new CTabPointer());
+                backend.lock()->events.newPointer.emit(m_pPointer);
+            }
+
+            auto& abs = event->data.pointer_motion_absolute;
+            m_pPointer->events.warp.emit(IPointer::SWarpEvent{
+                .timeMs   = (uint32_t)(abs.time_usec / 1000),
+                .absolute = {abs.x, abs.y},
+            });
+
+            pointerDirty = true;
+            break;
+        }
+        case TAB_INPUT_KIND_POINTER_AXIS: {
+            if (!m_pPointer) {
+                m_pPointer = SP<CTabPointer>(new CTabPointer());
+                backend.lock()->events.newPointer.emit(m_pPointer);
+            }
+
+            auto& axis = event->data.pointer_axis;
+
+            IPointer::SAxisEvent ev;
+            ev.timeMs = (uint32_t)(axis.time_usec / 1000);
+
+            ev.axis = axis.orientation == TAB_AXIS_VERTICAL ?
+                IPointer::AQ_POINTER_AXIS_VERTICAL :
+                IPointer::AQ_POINTER_AXIS_HORIZONTAL;
+
+            switch (axis.source) {
+                case TAB_AXIS_SOURCE_WHEEL:
+                    ev.source = IPointer::AQ_POINTER_AXIS_SOURCE_WHEEL;
+                    break;
+                case TAB_AXIS_SOURCE_FINGER:
+                    ev.source = IPointer::AQ_POINTER_AXIS_SOURCE_FINGER;
+                    break;
+                case TAB_AXIS_SOURCE_CONTINUOUS:
+                    ev.source = IPointer::AQ_POINTER_AXIS_SOURCE_CONTINUOUS;
+                    break;
+                case TAB_AXIS_SOURCE_WHEEL_TILT:
+                    ev.source = IPointer::AQ_POINTER_AXIS_SOURCE_TILT;
+                    break;
+            }
+
+            ev.delta    = axis.delta;
+            ev.discrete = axis.delta_discrete;
+
+            m_pPointer->events.axis.emit(ev);
+            pointerDirty = true;
+            break;
+        }
+        case TAB_INPUT_KIND_TOUCH_FRAME: {
+            if (m_pTouch)
+                m_pTouch->events.frame.emit();
+
+            touchDirty = true;
+            break;
+        }
+        case TAB_INPUT_KIND_TOUCH_CANCEL: {
+            if (!m_pTouch) {
+                m_pTouch = SP<CTabTouch>(new CTabTouch());
+                backend.lock()->events.newTouch.emit(m_pTouch);
+            }
+
+            auto& cancel = event->data.touch_cancel;
+            m_pTouch->events.cancel.emit(ITouch::SCancelEvent{
+                .timeMs  = (uint32_t)(cancel.time_usec / 1000),
+                .touchID = -1, // cancel all
+            });
+
+            touchDirty = true;
+            break;
+        }
+        case TAB_INPUT_KIND_TABLET_PAD_BUTTON: {
+            if (!m_pTabletPad) {
+                m_pTabletPad = SP<CTabTabletPad>(new CTabTabletPad());
+                backend.lock()->events.newTabletPad.emit(m_pTabletPad);
+            }
+
+            auto& b = event->data.tablet_pad_button;
+            m_pTabletPad->events.button.emit(ITabletPad::SButtonEvent{
+                .timeMs = (uint32_t)(b.time_usec / 1000),
+                .button = b.button,
+                .down   = b.state == TAB_BUTTON_PRESSED,
+                .mode   = 0,
+                .group  = 0,
+            });
+            break;
+        }
+        case TAB_INPUT_KIND_TABLET_PAD_RING: {
+            if (!m_pTabletPad) {
+                m_pTabletPad = SP<CTabTabletPad>(new CTabTabletPad());
+                backend.lock()->events.newTabletPad.emit(m_pTabletPad);
+            }
+
+            auto& r = event->data.tablet_pad_ring;
+            m_pTabletPad->events.ring.emit(ITabletPad::SRingEvent{
+                .timeMs = (uint32_t)(r.time_usec / 1000),
+                .source = ITabletPad::AQ_TABLET_PAD_RING_SOURCE_FINGER,
+                .ring   = (uint16_t)r.ring,
+                .pos    = r.position,
+                .mode   = 0,
+            });
+            break;
+        }
+        case TAB_INPUT_KIND_TABLET_PAD_STRIP: {
+            if (!m_pTabletPad) {
+                m_pTabletPad = SP<CTabTabletPad>(new CTabTabletPad());
+                backend.lock()->events.newTabletPad.emit(m_pTabletPad);
+            }
+
+            auto& s = event->data.tablet_pad_strip;
+            m_pTabletPad->events.strip.emit(ITabletPad::SStripEvent{
+                .timeMs = (uint32_t)(s.time_usec / 1000),
+                .source = ITabletPad::AQ_TABLET_PAD_STRIP_SOURCE_FINGER,
+                .strip  = (uint16_t)s.strip,
+                .pos    = s.position,
+                .mode   = 0,
+            });
+            break;
+        }
+        case TAB_INPUT_KIND_GESTURE_SWIPE_BEGIN: {
+    if (!m_pPointer) {
+        m_pPointer = SP<CTabPointer>(new CTabPointer());
+        backend.lock()->events.newPointer.emit(m_pPointer);
+    }
+
+    auto& g = event->data.swipe_begin;
+    m_pPointer->events.swipeBegin.emit(IPointer::SSwipeBeginEvent{
+        .timeMs  = (uint32_t)(g.time_usec / 1000),
+        .fingers = g.fingers,
+    });
+    break;
+}
+
+case TAB_INPUT_KIND_GESTURE_SWIPE_UPDATE: {
+    if (!m_pPointer) {
+        m_pPointer = SP<CTabPointer>(new CTabPointer());
+        backend.lock()->events.newPointer.emit(m_pPointer);
+    }
+
+    auto& g = event->data.swipe_update;
+    m_pPointer->events.swipeUpdate.emit(IPointer::SSwipeUpdateEvent{
+        .timeMs  = (uint32_t)(g.time_usec / 1000),
+        .fingers = g.fingers,
+        .delta   = { g.dx, g.dy },
+    });
+    break;
+}
+
+case TAB_INPUT_KIND_GESTURE_SWIPE_END: {
+    if (!m_pPointer) {
+        m_pPointer = SP<CTabPointer>(new CTabPointer());
+        backend.lock()->events.newPointer.emit(m_pPointer);
+    }
+
+    auto& g = event->data.swipe_end;
+    m_pPointer->events.swipeEnd.emit(IPointer::SSwipeEndEvent{
+        .timeMs    = (uint32_t)(g.time_usec / 1000),
+        .cancelled = g.cancelled,
+    });
+    break;
+}
+case TAB_INPUT_KIND_GESTURE_PINCH_BEGIN: {
+    if (!m_pPointer) {
+        m_pPointer = SP<CTabPointer>(new CTabPointer());
+        backend.lock()->events.newPointer.emit(m_pPointer);
+    }
+
+    auto& g = event->data.pinch_begin;
+    m_pPointer->events.pinchBegin.emit(IPointer::SPinchBeginEvent{
+        .timeMs  = (uint32_t)(g.time_usec / 1000),
+        .fingers = g.fingers,
+    });
+    break;
+}
+
+case TAB_INPUT_KIND_GESTURE_PINCH_UPDATE: {
+    if (!m_pPointer) {
+        m_pPointer = SP<CTabPointer>(new CTabPointer());
+        backend.lock()->events.newPointer.emit(m_pPointer);
+    }
+
+    auto& g = event->data.pinch_update;
+    m_pPointer->events.pinchUpdate.emit(IPointer::SPinchUpdateEvent{
+        .timeMs   = (uint32_t)(g.time_usec / 1000),
+        .fingers  = g.fingers,
+        .delta    = { g.dx, g.dy },
+        .scale    = g.scale,
+        .rotation = g.rotation,
+    });
+    break;
+}
+
+case TAB_INPUT_KIND_GESTURE_PINCH_END: {
+    if (!m_pPointer) {
+        m_pPointer = SP<CTabPointer>(new CTabPointer());
+        backend.lock()->events.newPointer.emit(m_pPointer);
+    }
+
+    auto& g = event->data.pinch_end;
+    m_pPointer->events.pinchEnd.emit(IPointer::SPinchEndEvent{
+        .timeMs    = (uint32_t)(g.time_usec / 1000),
+        .cancelled = g.cancelled,
+    });
+    break;
+}
+case TAB_INPUT_KIND_GESTURE_HOLD_BEGIN: {
+    if (!m_pPointer) {
+        m_pPointer = SP<CTabPointer>(new CTabPointer());
+        backend.lock()->events.newPointer.emit(m_pPointer);
+    }
+
+    auto& g = event->data.hold_begin;
+    m_pPointer->events.holdBegin.emit(IPointer::SHoldBeginEvent{
+        .timeMs  = (uint32_t)(g.time_usec / 1000),
+        .fingers = g.fingers,
+    });
+    break;
+}
+
+case TAB_INPUT_KIND_GESTURE_HOLD_END: {
+    if (!m_pPointer) {
+        m_pPointer = SP<CTabPointer>(new CTabPointer());
+        backend.lock()->events.newPointer.emit(m_pPointer);
+    }
+
+    auto& g = event->data.hold_end;
+    m_pPointer->events.holdEnd.emit(IPointer::SHoldEndEvent{
+        .timeMs    = (uint32_t)(g.time_usec / 1000),
+        .cancelled = g.cancelled,
+    });
+    break;
+}
+
         default: backend.lock()->log(AQ_LOG_DEBUG, std::format("tab backend: Got an unhandled input event of type {}", (int)event->kind)); break;
     }
 }
