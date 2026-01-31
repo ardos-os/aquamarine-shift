@@ -1,537 +1,680 @@
-#include "Shared.hpp"
-#include "aquamarine/allocator/Swapchain.hpp"
-#include "aquamarine/backend/Misc.hpp"
-#include "aquamarine/buffer/Buffer.hpp"
-#include "aquamarine/output/Output.hpp"
-#include <aquamarine/backend/Tab.hpp>
-#include <aquamarine/backend/Backend.hpp>
-#include <aquamarine/input/Input.hpp>
-#include <cstdlib>
-#include <drm_fourcc.h>
-#include <fcntl.h>
-#include <sys/timerfd.h>
+#include "aquamarine/backend/Tab.hpp"
 
-extern "C" {
-#include <tab_client.h>
-}
+#include "aquamarine/allocator/Swapchain.hpp"
+#include "aquamarine/backend/Backend.hpp"
+#include "aquamarine/buffer/Buffer.hpp"
+#include "aquamarine/input/Input.hpp"
+#include "aquamarine/output/Output.hpp"
+#include <algorithm>
+#include <cstdio>
+#include <drm_fourcc.h>
+#include <format>
+#include <optional>
+#include <ctime>
+#include <unistd.h>
 
 using namespace Aquamarine;
 using namespace Hyprutils::Memory;
 using namespace Hyprutils::Math;
 #define SP CSharedPointer
 
+namespace {
+
 class CTabKeyboard : public IKeyboard {
   public:
-    CTabKeyboard() {
-        ;
-    }
-
-    virtual const std::string& getName() {
+    const std::string& getName() override {
         static const std::string name = "tab-keyboard";
         return name;
     }
 
-    virtual libinput_device* getLibinputHandle() {
+    libinput_device* getLibinputHandle() override {
         return nullptr;
     }
 
-    virtual void updateLEDs(uint32_t leds) {
-        ;
+    void updateLEDs(uint32_t leds) override {
+        (void)leds;
     }
 };
 
 class CTabPointer : public IPointer {
   public:
-    CTabPointer() {
-        ;
-    }
-
-    virtual const std::string& getName() {
+    const std::string& getName() override {
         static const std::string name = "tab-pointer";
         return name;
     }
 
-    virtual libinput_device* getLibinputHandle() {
+    libinput_device* getLibinputHandle() override {
         return nullptr;
     }
 };
 
 class CTabTouch : public ITouch {
   public:
-    CTabTouch() {
-        ;
-    }
-
-    virtual const std::string& getName() {
+    const std::string& getName() override {
         static const std::string name = "tab-touch";
         return name;
     }
 
-    virtual libinput_device* getLibinputHandle() {
-        return nullptr;
-    }
-};
-
-class CTabTabletTool : public ITabletTool {
-  public:
-    CTabTabletTool() {
-        ;
-    }
-
-    virtual const std::string& getName() {
-        static const std::string name = "tab-tablet-tool";
-        return name;
-    }
-
-    virtual libinput_device* getLibinputHandle() {
+    libinput_device* getLibinputHandle() override {
         return nullptr;
     }
 };
 
 class CTabTablet : public ITablet {
   public:
-    CTabTablet() {
-        ;
-    }
-
-    virtual const std::string& getName() {
+    const std::string& getName() override {
         static const std::string name = "tab-tablet";
         return name;
     }
 
-    virtual libinput_device* getLibinputHandle() {
+    libinput_device* getLibinputHandle() override {
         return nullptr;
     }
 };
 
 class CTabTabletPad : public ITabletPad {
   public:
-    CTabTabletPad() {
-        ;
-    }
-
-    virtual const std::string& getName() {
+    const std::string& getName() override {
         static const std::string name = "tab-tablet-pad";
         return name;
     }
 
-    virtual libinput_device* getLibinputHandle() {
+    libinput_device* getLibinputHandle() override {
         return nullptr;
     }
 };
 
 class CTabSwitch : public ISwitch {
   public:
-    CTabSwitch() {
-        ;
-    }
-
-    virtual const std::string& getName() {
+    const std::string& getName() override {
         static const std::string name = "tab-switch";
         return name;
     }
 
-    virtual libinput_device* getLibinputHandle() {
+    libinput_device* getLibinputHandle() override {
+        return nullptr;
+    }
+};
+
+class CTabTabletTool : public ITabletTool {
+  public:
+    const std::string& getName() override {
+        static const std::string name = "tab-tablet-tool";
+        return name;
+    }
+
+    libinput_device* getLibinputHandle() override {
         return nullptr;
     }
 };
 
 class CTabBuffer : public IBuffer {
-    private:
-        TabFrameTarget target;
-    public:
-        CTabBuffer(const TabFrameTarget& target_) : target(target_) {
-            ;
-        }
-        virtual ~CTabBuffer() {
-            ;
-        }
-        virtual eBufferType type() {
-            return eBufferType::BUFFER_TYPE_DMABUF;
-        }
-        virtual eBufferCapability caps() {
-            return eBufferCapability::BUFFER_CAPABILITY_NONE;
-        }
-        virtual void update(const Hyprutils::Math::CRegion& damage) {
-            ;
-        }
-        virtual bool good() {
-            return true;
-        }
-        virtual SDMABUFAttrs dmabuf() {
-            SDMABUFAttrs attrs;
-            attrs.success = true;
-            attrs.size = Hyprutils::Math::Vector2D{(double)target.width, (double)target.height};
-            attrs.format = target.dmabuf.fourcc;
-            attrs.modifier = DRM_FORMAT_MOD_INVALID;
-            attrs.strides[0] = target.dmabuf.stride;
-            attrs.offsets[0] = target.dmabuf.offset;
-            attrs.fds[0] = target.dmabuf.fd;
-            return attrs;
-        }
-        virtual bool isSynchronous() {
-            return false;
-        }
+  public:
+    explicit CTabBuffer(const TabFrameTarget& target_) : target(target_) {
+        ;
+    }
+
+    ~CTabBuffer() override {
+        if (target.dmabuf.fd >= 0)
+            close(target.dmabuf.fd);
+    }
+
+    eBufferType type() override {
+        return eBufferType::BUFFER_TYPE_DMABUF;
+    }
+
+    eBufferCapability caps() override {
+        return eBufferCapability::BUFFER_CAPABILITY_NONE;
+    }
+
+    void update(const CRegion& damage) override {
+        (void)damage;
+    }
+
+    bool good() override {
+        return target.dmabuf.fd >= 0;
+    }
+
+    SDMABUFAttrs dmabuf() override {
+        SDMABUFAttrs attrs;
+        attrs.success          = target.dmabuf.fd >= 0;
+        attrs.size             = {double(target.width), double(target.height)};
+        attrs.format           = target.dmabuf.fourcc;
+        attrs.modifier         = DRM_FORMAT_MOD_INVALID;
+        attrs.strides[0]       = target.dmabuf.stride;
+        attrs.offsets[0]       = target.dmabuf.offset;
+        attrs.fds[0]           = target.dmabuf.fd;
+        attrs.planes           = 1;
+        return attrs;
+    }
+
+    bool isSynchronous() override {
+        return false;
+    }
+
+  private:
+    TabFrameTarget target;
 };
 
 class CTabSwapchain : public ISwapchain {
-    public:
-        SSwapchainOptions options;
-        TabClientHandle* tab_client;
-        std::string monitor_id;
-        virtual bool                                                 reconfigure(const SSwapchainOptions& options_) {
-            
-            // ignore
-            return true;
-        };
+  public:
+    CTabSwapchain(const TabMonitorInfo& monitor_info, TabClientHandle* handle)
+        : client(handle), monitorID(monitor_info.id) {
+        options.length = 2;
+        options.size   = {monitor_info.width, monitor_info.height};
+        options.format = DRM_FORMAT_ARGB8888;
+    }
 
-        virtual CSharedPointer<IBuffer> next(int* age) {
-            TabFrameTarget target;
+    bool reconfigure(const SSwapchainOptions& options_) override {
+        options = options_;
+        return true;
+    }
 
-            auto res = tab_client_acquire_frame(tab_client, monitor_id.c_str(), &target);
-            if (res != TAB_ACQUIRE_OK)
-                return nullptr;
+    CSharedPointer<IBuffer> next(int* age) override {
+        if (age)
+            *age = 0;
+        if (!client)
+            return nullptr;
 
-            return CSharedPointer<IBuffer>(new CTabBuffer(target));
-        }
+        TabFrameTarget target {};
+        const auto     res = tab_client_acquire_frame(client, monitorID.c_str(), &target);
+        if (res != TAB_ACQUIRE_OK)
+            return nullptr;
 
-        virtual const SSwapchainOptions&                             currentOptions() {
-            return options;
-        };
-        
+        pending = target.dmabuf.fd >= 0;
+        return CSharedPointer<IBuffer>(new CTabBuffer(target));
+    }
 
-        // rolls the buffers back, marking the last consumed as the next valid.
-        // useful if e.g. a commit fails and we don't wanna write to the previous buffer that is
-        // in use.
-        virtual void rollback() {
+    const SSwapchainOptions& currentOptions() override {
+        return options;
+    }
 
-        };
-        CTabSwapchain(const TabMonitorInfo& monitor_info, TabClientHandle* tab_client) {
-            TabFrameTarget target;
-            tab_client_acquire_frame(tab_client, monitor_id.c_str(), &target);
-            options = SSwapchainOptions {
-                .length = 2,
-                .size = {monitor_info.width, monitor_info.height},
-                .format = target.dmabuf.fourcc,
-                .scanout = false,
-                .cursor = false,
-                .multigpu = false
-            };
-            this->tab_client = tab_client;
-            this->monitor_id = std::string(monitor_info.id);
-        };
-        ~CTabSwapchain() {
-            ;
-        }
+    void rollback() override {
+        pending = false;
+    }
+
+    bool takePending() {
+        bool had = pending;
+        pending  = false;
+        return had;
+    }
+
+  private:
+    TabClientHandle*  client = nullptr;
+    std::string       monitorID;
+    SSwapchainOptions options;
+    bool              pending = false;
+
+    friend class CTabOutput;
 };
-Aquamarine::CTabOutput::CTabOutput(const TabMonitorInfo& monitor_info, Hyprutils::Memory::CWeakPointer<CTabBackend> backend_) : backend(backend_) {
-    this->name = std::string(monitor_info.name);
-    this->physicalSize = {(double)monitor_info.width, (double)monitor_info.height};
-    this->swapchain = Hyprutils::Memory::CSharedPointer<ISwapchain>(new CTabSwapchain(monitor_info, backend.lock()->m_pClient));
-    this->monitor_id = std::string(monitor_info.id);
-    this->modes.emplace_back(Hyprutils::Memory::CSharedPointer<SOutputMode>(new SOutputMode(Vector2D{(double)monitor_info.width, (double)monitor_info.height}, 60, true)));
 
+} // namespace
+
+CTabOutput::CTabOutput(const TabMonitorInfo& monitor_info, CWeakPointer<CTabBackend> backend_)
+    : backend(backend_), monitorID(monitor_info.id) {
+    name          = monitor_info.name;
+    physicalSize  = {double(monitor_info.width), double(monitor_info.height)};
+    refreshRateHz = monitor_info.refresh_rate > 0 ? monitor_info.refresh_rate : 60;
+    refreshIntervalNs = refreshRateHz > 0 ? (int)(1000000000LL / refreshRateHz) : 0;
+
+    const unsigned refreshmHz = std::max(1, refreshRateHz) * 1000U;
+    auto mode = CSharedPointer<SOutputMode>(
+        new SOutputMode({.pixelSize = {double(monitor_info.width), double(monitor_info.height)}, .refreshRate = refreshmHz, .preferred = true}));
+    modes.emplace_back(mode);
+    state->setMode(mode);
+
+    swapchain = CSharedPointer<ISwapchain>(new CTabSwapchain(monitor_info, backend.lock()->ensureClient()));
 }
 
-Aquamarine::CTabOutput::~CTabOutput() {
+CTabOutput::~CTabOutput() {
     events.destroy.emit();
 }
 
-
-bool Aquamarine::CTabOutput::commit() {
+bool CTabOutput::commit() {
     events.commit.emit();
     state->onCommit();
     needsFrame = false;
-    tab_client_swap_buffers(backend->m_pClient, this->monitor_id.c_str());
+    auto be = backend.lock();
+    if (!be)
+        return true;
+
+    auto sc = dynamicPointerCast<CTabSwapchain>(swapchain);
+    if (!sc)
+        return true;
+
+    if (auto client = be->ensureClient()) {
+        const bool sent = sc->takePending();
+        if (sent)
+            tab_client_swap_buffers(client, monitorID.c_str());
+        if (sent)
+            awaitingFrameDone = true;
+    }
+
     return true;
 }
 
-bool Aquamarine::CTabOutput::test() {
+bool CTabOutput::test() {
     return true;
 }
 
-SP<IBackendImplementation> Aquamarine::CTabOutput::getBackend() {
+SP<IBackendImplementation> CTabOutput::getBackend() {
     return backend.lock();
 }
 
-void Aquamarine::CTabOutput::scheduleFrame(const scheduleFrameReason reason) {
+void CTabOutput::scheduleFrame(const scheduleFrameReason) {
     needsFrame = true;
+    if (awaitingFrameDone || frameEventScheduled)
+        return;
+    frameEventScheduled = true;
+
+    auto be = backend.lock();
+    if (!be)
+        return;
+    if (auto core = be->backend.lock()) {
+        if (!frameIdle)
+            return;
+        core->addIdleEvent(frameIdle);
+    }
 }
 
-bool Aquamarine::CTabOutput::destroy() {
+bool CTabOutput::destroy() {
     events.destroy.emit();
-    std::erase_if(backend.lock()->outputs, [this](const auto& other) { return other.get() == this; });
+    if (auto be = backend.lock())
+        std::erase_if(be->outputs, [this](const auto& other) { return other.get() == this; });
     return true;
 }
 
-std::vector<SDRMFormat> Aquamarine::CTabOutput::getRenderFormats() {
+std::vector<SDRMFormat> CTabOutput::getRenderFormats() {
     if (auto be = backend.lock())
         return be->getRenderFormats();
     return {};
 }
 
-Aquamarine::CTabBackend::~CTabBackend() {
-    if (m_pClient)
-        tab_client_disconnect(m_pClient);
-}
-
-Aquamarine::CTabBackend::CTabBackend(SP<CBackend> backend_) : backend(backend_) {
-
-    timerFd  = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK);
-
-    struct itimerspec its = {
-        .it_interval = {0, 1000000},  // continuous
-        .it_value    = {0, 1000000},
-    };
-
-    timerfd_settime(timerFd, 0, &its, NULL);
-}
-
-eBackendType Aquamarine::CTabBackend::type() {
-    return eBackendType::AQ_BACKEND_TAB;
-}
-
-bool Aquamarine::CTabBackend::start() {
-
-    if(!m_pClient) m_pClient = tab_client_connect_default(std::getenv("SHIFT_SESSION_TOKEN"));
-    if (!m_pClient) {
-        std::cout << "tab backend: Client failed to connect\n";
-        return false;
-    }
-
-    std::cout << "tab backend: Client connected successfully.\n";
-
-    for (size_t i = 0; i < tab_client_get_monitor_count(m_pClient); ++i) {
-        char* mon_id = tab_client_get_monitor_id(m_pClient, i);
-        auto monitor_info = tab_client_get_monitor_info(m_pClient, mon_id);
-        createOutput(&monitor_info);
-        tab_client_free_monitor_info(&monitor_info);
-        tab_client_string_free(mon_id);
-    }
-
-    backend.lock()->events.pollFDsChanged.emit();
-
-    return true;
-}
-
-std::vector<SP<SPollFD>> Aquamarine::CTabBackend::pollFDs() {
-    if (!m_pClient)
-        return {};
-
-    return {SP<SPollFD>(new SPollFD{.fd=timerFd, .onSignal=[this]() { dispatchEvents(); }})};
-}
-
-int Aquamarine::CTabBackend::drmFD() {
-    return tab_client_drm_fd(m_pClient);
-}
-
-int Aquamarine::CTabBackend::drmRenderNodeFD() {
-    return tab_client_drm_fd(m_pClient);
-}
-
-bool Aquamarine::CTabBackend::dispatchEvents() {
-    uint64_t expirations;
-    read(timerFd, &expirations, sizeof(expirations));
-    if (!m_pClient)
-        return true;
-    tab_client_poll_events(m_pClient);
-    bool pointerDirty = false, touchDirty = false;
-    TabEvent event;
-    while (tab_client_next_event(m_pClient, &event)) {
-        switch (event.event_type) {
-            case TAB_EVENT_FRAME_DONE: {
-                auto mon_id = event.data.frame_done;
-                for (auto& output : outputs) {
-                    if (output->monitor_id == mon_id) {
-                        output->needsFrame = false;
-                        output->events.present.emit(IOutput::SPresentEvent{.presented = true});
-                        break;
-                    }
-                }
-                tab_client_string_free(mon_id);
-                break;
-            }
-            case TabEventType::TAB_EVENT_MONITOR_ADDED: {
-                auto mon = event.data.monitor_added;
-                backend.lock()->log(AQ_LOG_TRACE, std::format("tab backend: Monitor {} added", mon.id));
-                createOutput(&mon);
-                tab_client_free_monitor_info(&mon);
-                break;
-            }
-            case TabEventType::TAB_EVENT_MONITOR_REMOVED: {
-                auto mon_id = event.data.monitor_removed;
-                backend.lock()->log(AQ_LOG_TRACE, std::format("tab backend: Monitor {} removed", mon_id));
-                // find and remove the output
-                std::erase_if(outputs, [&](const auto& output) {
-                    if (output->name == mon_id) {
-                        output->destroy();
-                        return true;
-                    }
-                    return false;
-                });
-                tab_client_string_free(mon_id);
-                break;
-            }
-            case TabEventType::TAB_EVENT_INPUT: {
-                handleInput(&event.data.input, pointerDirty, touchDirty);
-                break;
-            }
-            default:
-                backend.lock()->log(AQ_LOG_DEBUG, std::format("tab backend: Got an unhandled event of type {}", (int)event.event_type));
-                break;
-        }
-    }
-
-    if (pointerDirty && m_pPointer){
-        m_pPointer->events.frame.emit();
-    }
-    if (touchDirty && m_pTouch)
-        m_pTouch->events.frame.emit();
-    TabFrameTarget target;
-    for(auto& output : outputs)
-        if (tab_client_acquire_frame(m_pClient, output->monitor_id.c_str(), &target) == TAB_ACQUIRE_OK)
-            {
-                output->needsFrame = true;
-                output->events.frame.emit();
-            }
-    return true;
-}
-
-uint32_t Aquamarine::CTabBackend::capabilities() {
-    
-    return 0;
-}
-
-bool Aquamarine::CTabBackend::setCursor(SP<IBuffer> buffer, const Hyprutils::Math::Vector2D& hotspot) {
-    return false;
-}
-
-void Aquamarine::CTabBackend::onReady() {
+CTabBackend::CTabBackend(CSharedPointer<CBackend> backend_) : backend(backend_) {
     ;
 }
 
+CTabBackend::~CTabBackend() {
+    if (client) {
+        tab_client_disconnect(client);
+        client = nullptr;
+    }
+}
 
+TabClientHandle* CTabBackend::ensureClient() {
+    if (client)
+        return client;
+    const char* token = std::getenv("SHIFT_SESSION_TOKEN");
+    client            = tab_client_connect_default(token);
+    if (!client && backend.lock())
+        backend.lock()->log(AQ_LOG_ERROR, "tab backend: failed to connect to Shift session");
+    return client;
+}
 
-void Aquamarine::CTabBackend::handleInput(TabInputEvent* event,
-    bool& pointerDirty,
-    bool& touchDirty
-) {
+CTabOutput* CTabBackend::findOutputByID(const std::string& id) {
+    for (auto& output : outputs)
+        if (output->monitorID == id)
+            return output.get();
+    return nullptr;
+}
 
+eBackendType CTabBackend::type() {
+    return eBackendType::AQ_BACKEND_TAB;
+}
+
+bool CTabBackend::start() {
+    if (!ensureClient())
+        return false;
+
+    auto core = backend.lock();
+    if (core)
+        core->log(AQ_LOG_DEBUG, "tab backend: connected to Shift");
+
+    const size_t count = tab_client_get_monitor_count(client);
+    for (size_t i = 0; i < count; ++i) {
+        char* id = tab_client_get_monitor_id(client, i);
+        if (!id)
+            continue;
+        auto info = tab_client_get_monitor_info(client, id);
+        createOutput(info);
+        tab_client_free_monitor_info(&info);
+        tab_client_string_free(id);
+    }
+
+    if (core)
+        core->events.pollFDsChanged.emit();
+
+    return true;
+}
+
+std::vector<CSharedPointer<SPollFD>> CTabBackend::pollFDs() {
+    if (!client)
+        return {};
+    const int fd = tab_client_get_socket_fd(client);
+    if (fd < 0)
+        return {};
+    return {CSharedPointer<SPollFD>(new SPollFD{.fd = fd, .onSignal = [this]() { dispatchEvents(); }})};
+}
+
+int CTabBackend::drmFD() {
+    return client ? tab_client_drm_fd(client) : -1;
+}
+
+int CTabBackend::drmRenderNodeFD() {
+    return drmFD();
+}
+
+bool CTabBackend::dispatchEvents() {
+    if (!client)
+        return true;
+
+    tab_client_poll_events(client);
+
+    TabEvent event {};
+    while (tab_client_next_event(client, &event)) {
+        switch (event.event_type) {
+            case TAB_EVENT_FRAME_DONE: {
+                if (event.data.frame_done) {
+                    std::string id(event.data.frame_done);
+                    if (auto output = findOutputByID(id)) {
+                        if (!output->awaitingFrameDone) {
+                            break;
+                        }
+                        timespec now {};
+                        clock_gettime(CLOCK_MONOTONIC, &now);
+                        output->lastPresentTime = now;
+                        output->events.present.emit(IOutput::SPresentEvent{
+                            .presented = true,
+                            .when      = &output->lastPresentTime,
+                            .seq       = ++output->presentSeq,
+                            .refresh   = output->refreshIntervalNs,
+                            .flags     = IOutput::AQ_OUTPUT_PRESENT_VSYNC,
+                        });
+                        output->awaitingFrameDone = false;
+                        if (output->needsFrame && !output->frameEventScheduled) {
+                            output->scheduleFrame(IOutput::AQ_SCHEDULE_NEEDS_FRAME);
+                        }
+                    } else if (auto core = backend.lock()) {
+                        core->log(AQ_LOG_WARNING, std::format("tab frame_done for unknown monitor {}", id));
+                    }
+                } else if (auto core = backend.lock()) {
+                    core->log(AQ_LOG_WARNING, "tab frame_done event with null monitor id");
+                }
+                break;
+            }
+            case TAB_EVENT_MONITOR_ADDED: {
+                createOutput(event.data.monitor_added);
+                break;
+            }
+            case TAB_EVENT_MONITOR_REMOVED: {
+                if (event.data.monitor_removed) {
+                    std::string id(event.data.monitor_removed);
+                    std::erase_if(outputs, [&](const auto& other) {
+                        if (other->monitorID == id) {
+                            other->destroy();
+                            return true;
+                        }
+                        return false;
+                    });
+                }
+                break;
+            }
+            case TAB_EVENT_INPUT: {
+                bool pointerDirty = false;
+                bool touchDirty   = false;
+                handleInput(&event.data.input, pointerDirty, touchDirty);
+                if (pointerDirty && pointer)
+                    pointer->events.frame.emit();
+                if (touchDirty && touch)
+                    touch->events.frame.emit();
+                break;
+            }
+            default: {
+                if (auto core = backend.lock())
+                    core->log(AQ_LOG_DEBUG,
+                              std::format("tab backend: unhandled event {}", (int)event.event_type));
+                break;
+            }
+        }
+        tab_client_free_event_strings(&event);
+    }
+    return true;
+}
+
+uint32_t CTabBackend::capabilities() {
+    return 0;
+}
+
+bool CTabBackend::setCursor(SP<IBuffer>, const Vector2D&) {
+    return false;
+}
+
+void CTabBackend::onReady() {
+    ;
+}
+
+std::vector<SDRMFormat> CTabBackend::getRenderFormats() {
+    if (auto core = backend.lock()) {
+        for (const auto& impl : core->getImplementations()) {
+            if (impl->type() != AQ_BACKEND_DRM || impl->getRenderableFormats().empty())
+                continue;
+            return impl->getRenderableFormats();
+        }
+    }
+
+    return {SDRMFormat{.drmFormat = DRM_FORMAT_XRGB8888, .modifiers = {DRM_FORMAT_INVALID}},
+            SDRMFormat{.drmFormat = DRM_FORMAT_ARGB8888, .modifiers = {DRM_FORMAT_INVALID}}};
+}
+
+std::vector<SDRMFormat> CTabBackend::getCursorFormats() {
+    return {};
+}
+
+bool CTabBackend::createOutput(const TabMonitorInfo& monitor_info) {
+    auto output = CSharedPointer<CTabOutput>(new CTabOutput(monitor_info, self));
+    output->self = output;
+    output->frameIdle = makeShared<std::function<void(void)>>([w = output->self]() {
+        if (auto o = w.lock()) {
+            o->frameEventScheduled = false;
+            if (o->awaitingFrameDone) {
+                return;
+            }
+            o->events.frame.emit();
+        }
+    });
+    outputs.emplace_back(output);
+    if (auto core = backend.lock())
+        core->events.newOutput.emit(output);
+    return true;
+}
+
+CSharedPointer<IAllocator> CTabBackend::preferredAllocator() {
+    return nullptr;
+}
+
+std::vector<CSharedPointer<IAllocator>> CTabBackend::getAllocators() {
+    return {};
+}
+
+CWeakPointer<IBackendImplementation> CTabBackend::getPrimary() {
+    return self;
+}
+
+void CTabBackend::handleInput(TabInputEvent* event, bool& pointerDirty, bool& touchDirty) {
+    auto core = backend.lock();
     switch (event->kind) {
         case TAB_INPUT_KIND_KEY: {
-            if (!m_pKeyboard) {
-                m_pKeyboard = SP<CTabKeyboard>(new CTabKeyboard());
-                backend.lock()->events.newKeyboard.emit(m_pKeyboard);
+            if (!keyboard) {
+                keyboard = CSharedPointer<IKeyboard>(new CTabKeyboard());
+                if (core)
+                    core->events.newKeyboard.emit(keyboard);
             }
             auto& key = event->data.key;
-            m_pKeyboard->events.key.emit(IKeyboard::SKeyEvent{
+            keyboard->events.key.emit(IKeyboard::SKeyEvent{
                 .timeMs  = (uint32_t)(key.time_usec / 1000),
                 .key     = key.key,
-                .pressed = key.state == TabKeyState::TAB_KEY_PRESSED,
+                .pressed = key.state == TAB_KEY_PRESSED,
             });
             break;
         }
         case TAB_INPUT_KIND_POINTER_BUTTON: {
-            if (!m_pPointer) {
-                m_pPointer = SP<CTabPointer>(new CTabPointer());
-                backend.lock()->events.newPointer.emit(m_pPointer);
+            if (!pointer) {
+                pointer = CSharedPointer<IPointer>(new CTabPointer());
+                if (core)
+                    core->events.newPointer.emit(pointer);
             }
             auto& button = event->data.pointer_button;
-            m_pPointer->events.button.emit(IPointer::SButtonEvent{
+            pointer->events.button.emit(IPointer::SButtonEvent{
                 .timeMs  = (uint32_t)(button.time_usec / 1000),
                 .button  = button.button,
-                .pressed = button.state == TabButtonState::TAB_BUTTON_PRESSED,
+                .pressed = button.state == TAB_BUTTON_PRESSED,
             });
             pointerDirty = true;
             break;
         }
         case TAB_INPUT_KIND_POINTER_MOTION: {
-            if (!m_pPointer) {
-                m_pPointer = SP<CTabPointer>(new CTabPointer());
-                backend.lock()->events.newPointer.emit(m_pPointer);
+            if (!pointer) {
+                pointer = CSharedPointer<IPointer>(new CTabPointer());
+                if (core)
+                    core->events.newPointer.emit(pointer);
             }
             auto& motion = event->data.pointer_motion;
-            auto event = IPointer::SMoveEvent{
+            pointer->events.move.emit(IPointer::SMoveEvent{
                 .timeMs = (uint32_t)(motion.time_usec / 1000),
                 .delta  = {motion.dx, motion.dy},
-                .unaccel  = {motion.unaccel_dx, motion.unaccel_dy},
-                
-
-            };
-            m_pPointer->events.move.emit(event);
-            // debug print
-            
+                .unaccel = {motion.unaccel_dx, motion.unaccel_dy},
+            });
+            pointerDirty = true;
+            break;
+        }
+        case TAB_INPUT_KIND_POINTER_MOTION_ABSOLUTE: {
+            if (!pointer) {
+                pointer = CSharedPointer<IPointer>(new CTabPointer());
+                if (core)
+                    core->events.newPointer.emit(pointer);
+            }
+            auto& abs = event->data.pointer_motion_absolute;
+            pointer->events.warp.emit(IPointer::SWarpEvent{
+                .timeMs   = (uint32_t)(abs.time_usec / 1000),
+                .absolute = {abs.x, abs.y},
+            });
+            pointerDirty = true;
+            break;
+        }
+        case TAB_INPUT_KIND_POINTER_AXIS: {
+            if (!pointer) {
+                pointer = CSharedPointer<IPointer>(new CTabPointer());
+                if (core)
+                    core->events.newPointer.emit(pointer);
+            }
+            auto& axis = event->data.pointer_axis;
+            IPointer::SAxisEvent ev;
+            ev.timeMs = (uint32_t)(axis.time_usec / 1000);
+            ev.axis   = axis.orientation == TAB_AXIS_VERTICAL ? IPointer::AQ_POINTER_AXIS_VERTICAL : IPointer::AQ_POINTER_AXIS_HORIZONTAL;
+            switch (axis.source) {
+                case TAB_AXIS_SOURCE_WHEEL: ev.source = IPointer::AQ_POINTER_AXIS_SOURCE_WHEEL; break;
+                case TAB_AXIS_SOURCE_FINGER: ev.source = IPointer::AQ_POINTER_AXIS_SOURCE_FINGER; break;
+                case TAB_AXIS_SOURCE_CONTINUOUS: ev.source = IPointer::AQ_POINTER_AXIS_SOURCE_CONTINUOUS; break;
+                case TAB_AXIS_SOURCE_WHEEL_TILT: ev.source = IPointer::AQ_POINTER_AXIS_SOURCE_TILT; break;
+            }
+            ev.delta    = axis.delta;
+            ev.discrete = axis.delta_discrete;
+            pointer->events.axis.emit(ev);
             pointerDirty = true;
             break;
         }
         case TAB_INPUT_KIND_TOUCH_DOWN: {
-            if (!m_pTouch) {
-                m_pTouch = SP<CTabTouch>(new CTabTouch());
-                backend.lock()->events.newTouch.emit(m_pTouch);
+            if (!touch) {
+                touch = CSharedPointer<ITouch>(new CTabTouch());
+                if (core)
+                    core->events.newTouch.emit(touch);
             }
-            auto& touch = event->data.touch_down;
-            m_pTouch->events.down.emit(ITouch::SDownEvent{
-                .timeMs  = (uint32_t)(touch.time_usec / 1000),
-                .touchID = touch.contact.id,
-                .pos     = {touch.contact.x, touch.contact.y},
+            auto& t = event->data.touch_down;
+            touch->events.down.emit(ITouch::SDownEvent{
+                .timeMs  = (uint32_t)(t.time_usec / 1000),
+                .touchID = t.contact.id,
+                .pos     = {t.contact.x, t.contact.y},
             });
             touchDirty = true;
             break;
         }
         case TAB_INPUT_KIND_TOUCH_UP: {
-            if (!m_pTouch) {
-                m_pTouch = SP<CTabTouch>(new CTabTouch());
-                backend.lock()->events.newTouch.emit(m_pTouch);
+            if (!touch) {
+                touch = CSharedPointer<ITouch>(new CTabTouch());
+                if (core)
+                    core->events.newTouch.emit(touch);
             }
-            auto& touch = event->data.touch_up;
-            m_pTouch->events.up.emit(ITouch::SUpEvent{
-                .timeMs  = (uint32_t)(touch.time_usec / 1000),
-                .touchID = touch.contact_id,
+            auto& t = event->data.touch_up;
+            touch->events.up.emit(ITouch::SUpEvent{
+                .timeMs  = (uint32_t)(t.time_usec / 1000),
+                .touchID = t.contact_id,
             });
             touchDirty = true;
             break;
         }
         case TAB_INPUT_KIND_TOUCH_MOTION: {
-            if (!m_pTouch) {
-                m_pTouch = SP<CTabTouch>(new CTabTouch());
-                backend.lock()->events.newTouch.emit(m_pTouch);
+            if (!touch) {
+                touch = CSharedPointer<ITouch>(new CTabTouch());
+                if (core)
+                    core->events.newTouch.emit(touch);
             }
-            auto& touch = event->data.touch_motion;
-            m_pTouch->events.move.emit(ITouch::SMotionEvent{
-                .timeMs  = (uint32_t)(touch.time_usec / 1000),
-                .touchID = touch.contact.id,
-                .pos     = {touch.contact.x, touch.contact.y},
+            auto& t = event->data.touch_motion;
+            touch->events.move.emit(ITouch::SMotionEvent{
+                .timeMs  = (uint32_t)(t.time_usec / 1000),
+                .touchID = t.contact.id,
+                .pos     = {t.contact.x, t.contact.y},
+            });
+            touchDirty = true;
+            break;
+        }
+        case TAB_INPUT_KIND_TOUCH_FRAME: {
+            if (touch)
+                touch->events.frame.emit();
+            touchDirty = true;
+            break;
+        }
+        case TAB_INPUT_KIND_TOUCH_CANCEL: {
+            if (!touch) {
+                touch = CSharedPointer<ITouch>(new CTabTouch());
+                if (core)
+                    core->events.newTouch.emit(touch);
+            }
+            auto& cancel = event->data.touch_cancel;
+            touch->events.cancel.emit(ITouch::SCancelEvent{
+                .timeMs  = (uint32_t)(cancel.time_usec / 1000),
+                .touchID = -1,
             });
             touchDirty = true;
             break;
         }
         case TAB_INPUT_KIND_TABLET_TOOL_AXIS: {
-            if (!m_pTablet) {
-                m_pTablet = SP<CTabTablet>(new CTabTablet());
-                backend.lock()->events.newTablet.emit(m_pTablet);
+            if (!tablet) {
+                tablet = CSharedPointer<ITablet>(new CTabTablet());
+                if (core)
+                    core->events.newTablet.emit(tablet);
             }
             auto& axis = event->data.tablet_tool_axis;
-            auto  tool = SP<CTabTabletTool>(new CTabTabletTool());
-            m_pTablet->events.axis.emit(ITablet::SAxisEvent{
-                .tool   = tool,
-                .timeMs = (uint32_t)(axis.time_usec / 1000),
+            auto  tool = CSharedPointer<ITabletTool>(new CTabTabletTool());
+            tablet->events.axis.emit(ITablet::SAxisEvent{
+                .tool     = tool,
+                .timeMs   = (uint32_t)(axis.time_usec / 1000),
                 .absolute = {axis.axes.x, axis.axes.y},
-                .tilt = {axis.axes.tilt_x, axis.axes.tilt_y},
+                .tilt     = {axis.axes.tilt_x, axis.axes.tilt_y},
                 .pressure = axis.axes.pressure,
                 .distance = axis.axes.distance,
                 .rotation = axis.axes.rotation,
             });
-            
             break;
         }
         case TAB_INPUT_KIND_TABLET_TOOL_PROXIMITY: {
-            if (!m_pTablet) {
-                m_pTablet = SP<CTabTablet>(new CTabTablet());
-                backend.lock()->events.newTablet.emit(m_pTablet);
+            if (!tablet) {
+                tablet = CSharedPointer<ITablet>(new CTabTablet());
+                if (core)
+                    core->events.newTablet.emit(tablet);
             }
             auto& proximity = event->data.tablet_tool_proximity;
-            auto  tool      = SP<CTabTabletTool>(new CTabTabletTool());
-            m_pTablet->events.proximity.emit(ITablet::SProximityEvent{
+            auto  tool      = CSharedPointer<ITabletTool>(new CTabTabletTool());
+            tablet->events.proximity.emit(ITablet::SProximityEvent{
                 .tool   = tool,
                 .timeMs = (uint32_t)(proximity.time_usec / 1000),
                 .in     = proximity.in_proximity,
@@ -539,131 +682,44 @@ void Aquamarine::CTabBackend::handleInput(TabInputEvent* event,
             break;
         }
         case TAB_INPUT_KIND_TABLET_TOOL_TIP: {
-            if (!m_pTablet) {
-                m_pTablet = SP<CTabTablet>(new CTabTablet());
-                backend.lock()->events.newTablet.emit(m_pTablet);
+            if (!tablet) {
+                tablet = CSharedPointer<ITablet>(new CTabTablet());
+                if (core)
+                    core->events.newTablet.emit(tablet);
             }
             auto& tip  = event->data.tablet_tool_tip;
-            auto  tool = SP<CTabTabletTool>(new CTabTabletTool());
-            m_pTablet->events.tip.emit(ITablet::STipEvent{
+            auto  tool = CSharedPointer<ITabletTool>(new CTabTabletTool());
+            tablet->events.tip.emit(ITablet::STipEvent{
                 .tool   = tool,
                 .timeMs = (uint32_t)(tip.time_usec / 1000),
                 .down   = tip.state == TAB_TIP_DOWN,
             });
-            
             break;
         }
         case TAB_INPUT_KIND_TABLET_TOOL_BUTTON: {
-            if (!m_pTablet) {
-                m_pTablet = SP<CTabTablet>(new CTabTablet());
-                backend.lock()->events.newTablet.emit(m_pTablet);
+            if (!tablet) {
+                tablet = CSharedPointer<ITablet>(new CTabTablet());
+                if (core)
+                    core->events.newTablet.emit(tablet);
             }
             auto& button = event->data.tablet_tool_button;
-            auto  tool   = SP<CTabTabletTool>(new CTabTabletTool());
-            m_pTablet->events.button.emit(ITablet::SButtonEvent{
+            auto  tool   = CSharedPointer<ITabletTool>(new CTabTabletTool());
+            tablet->events.button.emit(ITablet::SButtonEvent{
                 .tool   = tool,
                 .timeMs = (uint32_t)(button.time_usec / 1000),
                 .button = button.button,
                 .down   = button.state == TAB_BUTTON_PRESSED,
             });
-            
-            break;
-        }
-        case TAB_INPUT_KIND_SWITCH_TOGGLE: {
-            if (!m_pSwitch) {
-                m_pSwitch = SP<CTabSwitch>(new CTabSwitch());
-                backend.lock()->events.newSwitch.emit(m_pSwitch);
-            }
-            auto& sw = event->data.switch_toggle;
-            m_pSwitch->events.fire.emit(ISwitch::SFireEvent{
-                .timeMs = (uint32_t)(sw.time_usec / 1000),
-                .type = sw.switch_type == TAB_SWITCH_LID ? ISwitch::eSwitchType::AQ_SWITCH_TYPE_LID : ISwitch::eSwitchType::AQ_SWITCH_TYPE_TABLET_MODE,
-                .enable = sw.state == TAB_SWITCH_ON,
-            });
-            break;
-        }
-        case TAB_INPUT_KIND_POINTER_MOTION_ABSOLUTE: {
-            if (!m_pPointer) {
-                m_pPointer = SP<CTabPointer>(new CTabPointer());
-                backend.lock()->events.newPointer.emit(m_pPointer);
-            }
-
-            auto& abs = event->data.pointer_motion_absolute;
-            m_pPointer->events.warp.emit(IPointer::SWarpEvent{
-                .timeMs   = (uint32_t)(abs.time_usec / 1000),
-                .absolute = {abs.x, abs.y},
-            });
-
-            pointerDirty = true;
-            break;
-        }
-        case TAB_INPUT_KIND_POINTER_AXIS: {
-            if (!m_pPointer) {
-                m_pPointer = SP<CTabPointer>(new CTabPointer());
-                backend.lock()->events.newPointer.emit(m_pPointer);
-            }
-
-            auto& axis = event->data.pointer_axis;
-
-            IPointer::SAxisEvent ev;
-            ev.timeMs = (uint32_t)(axis.time_usec / 1000);
-
-            ev.axis = axis.orientation == TAB_AXIS_VERTICAL ?
-                IPointer::AQ_POINTER_AXIS_VERTICAL :
-                IPointer::AQ_POINTER_AXIS_HORIZONTAL;
-
-            switch (axis.source) {
-                case TAB_AXIS_SOURCE_WHEEL:
-                    ev.source = IPointer::AQ_POINTER_AXIS_SOURCE_WHEEL;
-                    break;
-                case TAB_AXIS_SOURCE_FINGER:
-                    ev.source = IPointer::AQ_POINTER_AXIS_SOURCE_FINGER;
-                    break;
-                case TAB_AXIS_SOURCE_CONTINUOUS:
-                    ev.source = IPointer::AQ_POINTER_AXIS_SOURCE_CONTINUOUS;
-                    break;
-                case TAB_AXIS_SOURCE_WHEEL_TILT:
-                    ev.source = IPointer::AQ_POINTER_AXIS_SOURCE_TILT;
-                    break;
-            }
-
-            ev.delta    = axis.delta;
-            ev.discrete = axis.delta_discrete;
-
-            m_pPointer->events.axis.emit(ev);
-            pointerDirty = true;
-            break;
-        }
-        case TAB_INPUT_KIND_TOUCH_FRAME: {
-            if (m_pTouch)
-                m_pTouch->events.frame.emit();
-
-            touchDirty = true;
-            break;
-        }
-        case TAB_INPUT_KIND_TOUCH_CANCEL: {
-            if (!m_pTouch) {
-                m_pTouch = SP<CTabTouch>(new CTabTouch());
-                backend.lock()->events.newTouch.emit(m_pTouch);
-            }
-
-            auto& cancel = event->data.touch_cancel;
-            m_pTouch->events.cancel.emit(ITouch::SCancelEvent{
-                .timeMs  = (uint32_t)(cancel.time_usec / 1000),
-                .touchID = -1, // cancel all
-            });
-
-            touchDirty = true;
             break;
         }
         case TAB_INPUT_KIND_TABLET_PAD_BUTTON: {
-            if (!m_pTabletPad) {
-                m_pTabletPad = SP<CTabTabletPad>(new CTabTabletPad());
-                backend.lock()->events.newTabletPad.emit(m_pTabletPad);
+            if (!tabletPad) {
+                tabletPad = CSharedPointer<ITabletPad>(new CTabTabletPad());
+                if (core)
+                    core->events.newTabletPad.emit(tabletPad);
             }
-
             auto& b = event->data.tablet_pad_button;
-            m_pTabletPad->events.button.emit(ITabletPad::SButtonEvent{
+            tabletPad->events.button.emit(ITabletPad::SButtonEvent{
                 .timeMs = (uint32_t)(b.time_usec / 1000),
                 .button = b.button,
                 .down   = b.state == TAB_BUTTON_PRESSED,
@@ -673,13 +729,13 @@ void Aquamarine::CTabBackend::handleInput(TabInputEvent* event,
             break;
         }
         case TAB_INPUT_KIND_TABLET_PAD_RING: {
-            if (!m_pTabletPad) {
-                m_pTabletPad = SP<CTabTabletPad>(new CTabTabletPad());
-                backend.lock()->events.newTabletPad.emit(m_pTabletPad);
+            if (!tabletPad) {
+                tabletPad = CSharedPointer<ITabletPad>(new CTabTabletPad());
+                if (core)
+                    core->events.newTabletPad.emit(tabletPad);
             }
-
             auto& r = event->data.tablet_pad_ring;
-            m_pTabletPad->events.ring.emit(ITabletPad::SRingEvent{
+            tabletPad->events.ring.emit(ITabletPad::SRingEvent{
                 .timeMs = (uint32_t)(r.time_usec / 1000),
                 .source = ITabletPad::AQ_TABLET_PAD_RING_SOURCE_FINGER,
                 .ring   = (uint16_t)r.ring,
@@ -689,13 +745,13 @@ void Aquamarine::CTabBackend::handleInput(TabInputEvent* event,
             break;
         }
         case TAB_INPUT_KIND_TABLET_PAD_STRIP: {
-            if (!m_pTabletPad) {
-                m_pTabletPad = SP<CTabTabletPad>(new CTabTabletPad());
-                backend.lock()->events.newTabletPad.emit(m_pTabletPad);
+            if (!tabletPad) {
+                tabletPad = CSharedPointer<ITabletPad>(new CTabTabletPad());
+                if (core)
+                    core->events.newTabletPad.emit(tabletPad);
             }
-
             auto& s = event->data.tablet_pad_strip;
-            m_pTabletPad->events.strip.emit(ITabletPad::SStripEvent{
+            tabletPad->events.strip.emit(ITabletPad::SStripEvent{
                 .timeMs = (uint32_t)(s.time_usec / 1000),
                 .source = ITabletPad::AQ_TABLET_PAD_STRIP_SOURCE_FINGER,
                 .strip  = (uint16_t)s.strip,
@@ -704,172 +760,24 @@ void Aquamarine::CTabBackend::handleInput(TabInputEvent* event,
             });
             break;
         }
-        case TAB_INPUT_KIND_GESTURE_SWIPE_BEGIN: {
-    if (!m_pPointer) {
-        m_pPointer = SP<CTabPointer>(new CTabPointer());
-        backend.lock()->events.newPointer.emit(m_pPointer);
+        case TAB_INPUT_KIND_SWITCH_TOGGLE: {
+            if (!switchDev) {
+                switchDev = CSharedPointer<ISwitch>(new CTabSwitch());
+                if (core)
+                    core->events.newSwitch.emit(switchDev);
+            }
+            auto& sw = event->data.switch_toggle;
+            switchDev->events.fire.emit(ISwitch::SFireEvent{
+                .timeMs = (uint32_t)(sw.time_usec / 1000),
+                .type   = sw.switch_type == TAB_SWITCH_LID ? ISwitch::AQ_SWITCH_TYPE_LID : ISwitch::AQ_SWITCH_TYPE_TABLET_MODE,
+                .enable = sw.state == TAB_SWITCH_ON,
+            });
+            break;
+        }
+        default: {
+            if (core)
+                core->log(AQ_LOG_DEBUG, std::format("tab backend: unhandled input type {}", (int)event->kind));
+            break;
+        }
     }
-
-    auto& g = event->data.swipe_begin;
-    m_pPointer->events.swipeBegin.emit(IPointer::SSwipeBeginEvent{
-        .timeMs  = (uint32_t)(g.time_usec / 1000),
-        .fingers = g.fingers,
-    });
-    break;
-}
-
-case TAB_INPUT_KIND_GESTURE_SWIPE_UPDATE: {
-    if (!m_pPointer) {
-        m_pPointer = SP<CTabPointer>(new CTabPointer());
-        backend.lock()->events.newPointer.emit(m_pPointer);
-    }
-
-    auto& g = event->data.swipe_update;
-    m_pPointer->events.swipeUpdate.emit(IPointer::SSwipeUpdateEvent{
-        .timeMs  = (uint32_t)(g.time_usec / 1000),
-        .fingers = g.fingers,
-        .delta   = { g.dx, g.dy },
-    });
-    break;
-}
-
-case TAB_INPUT_KIND_GESTURE_SWIPE_END: {
-    if (!m_pPointer) {
-        m_pPointer = SP<CTabPointer>(new CTabPointer());
-        backend.lock()->events.newPointer.emit(m_pPointer);
-    }
-
-    auto& g = event->data.swipe_end;
-    m_pPointer->events.swipeEnd.emit(IPointer::SSwipeEndEvent{
-        .timeMs    = (uint32_t)(g.time_usec / 1000),
-        .cancelled = g.cancelled,
-    });
-    break;
-}
-case TAB_INPUT_KIND_GESTURE_PINCH_BEGIN: {
-    if (!m_pPointer) {
-        m_pPointer = SP<CTabPointer>(new CTabPointer());
-        backend.lock()->events.newPointer.emit(m_pPointer);
-    }
-
-    auto& g = event->data.pinch_begin;
-    m_pPointer->events.pinchBegin.emit(IPointer::SPinchBeginEvent{
-        .timeMs  = (uint32_t)(g.time_usec / 1000),
-        .fingers = g.fingers,
-    });
-    break;
-}
-
-case TAB_INPUT_KIND_GESTURE_PINCH_UPDATE: {
-    if (!m_pPointer) {
-        m_pPointer = SP<CTabPointer>(new CTabPointer());
-        backend.lock()->events.newPointer.emit(m_pPointer);
-    }
-
-    auto& g = event->data.pinch_update;
-    m_pPointer->events.pinchUpdate.emit(IPointer::SPinchUpdateEvent{
-        .timeMs   = (uint32_t)(g.time_usec / 1000),
-        .fingers  = g.fingers,
-        .delta    = { g.dx, g.dy },
-        .scale    = g.scale,
-        .rotation = g.rotation,
-    });
-    break;
-}
-
-case TAB_INPUT_KIND_GESTURE_PINCH_END: {
-    if (!m_pPointer) {
-        m_pPointer = SP<CTabPointer>(new CTabPointer());
-        backend.lock()->events.newPointer.emit(m_pPointer);
-    }
-
-    auto& g = event->data.pinch_end;
-    m_pPointer->events.pinchEnd.emit(IPointer::SPinchEndEvent{
-        .timeMs    = (uint32_t)(g.time_usec / 1000),
-        .cancelled = g.cancelled,
-    });
-    break;
-}
-case TAB_INPUT_KIND_GESTURE_HOLD_BEGIN: {
-    if (!m_pPointer) {
-        m_pPointer = SP<CTabPointer>(new CTabPointer());
-        backend.lock()->events.newPointer.emit(m_pPointer);
-    }
-
-    auto& g = event->data.hold_begin;
-    m_pPointer->events.holdBegin.emit(IPointer::SHoldBeginEvent{
-        .timeMs  = (uint32_t)(g.time_usec / 1000),
-        .fingers = g.fingers,
-    });
-    break;
-}
-
-case TAB_INPUT_KIND_GESTURE_HOLD_END: {
-    if (!m_pPointer) {
-        m_pPointer = SP<CTabPointer>(new CTabPointer());
-        backend.lock()->events.newPointer.emit(m_pPointer);
-    }
-
-    auto& g = event->data.hold_end;
-    m_pPointer->events.holdEnd.emit(IPointer::SHoldEndEvent{
-        .timeMs    = (uint32_t)(g.time_usec / 1000),
-        .cancelled = g.cancelled,
-    });
-    break;
-}
-
-        default: backend.lock()->log(AQ_LOG_DEBUG, std::format("tab backend: Got an unhandled input event of type {}", (int)event->kind)); break;
-    }
-}
-
-std::vector<SDRMFormat> Aquamarine::CTabBackend::getRenderFormats() {
-    for (const auto& impl : backend->getImplementations()) {
-        if (impl->type() != AQ_BACKEND_DRM || impl->getRenderableFormats().empty())
-            continue;
-        return impl->getRenderableFormats();
-    }
-
-    // formats probably supported by EGL
-    return {SDRMFormat{.drmFormat = DRM_FORMAT_XRGB8888, .modifiers = {DRM_FORMAT_INVALID}},
-            SDRMFormat{.drmFormat = DRM_FORMAT_XBGR8888, .modifiers = {DRM_FORMAT_INVALID}},
-            SDRMFormat{.drmFormat = DRM_FORMAT_RGBX8888, .modifiers = {DRM_FORMAT_INVALID}},
-            SDRMFormat{.drmFormat = DRM_FORMAT_BGRX8888, .modifiers = {DRM_FORMAT_INVALID}},
-            SDRMFormat{.drmFormat = DRM_FORMAT_ARGB8888, .modifiers = {DRM_FORMAT_INVALID}},
-            SDRMFormat{.drmFormat = DRM_FORMAT_ABGR8888, .modifiers = {DRM_FORMAT_INVALID}},
-            SDRMFormat{.drmFormat = DRM_FORMAT_RGBA8888, .modifiers = {DRM_FORMAT_INVALID}},
-            SDRMFormat{.drmFormat = DRM_FORMAT_BGRA8888, .modifiers = {DRM_FORMAT_INVALID}},
-            SDRMFormat{.drmFormat = DRM_FORMAT_XRGB2101010, .modifiers = {DRM_FORMAT_MOD_LINEAR}},
-            SDRMFormat{.drmFormat = DRM_FORMAT_XBGR2101010, .modifiers = {DRM_FORMAT_MOD_LINEAR}},
-            SDRMFormat{.drmFormat = DRM_FORMAT_RGBX1010102, .modifiers = {DRM_FORMAT_MOD_LINEAR}},
-            SDRMFormat{.drmFormat = DRM_FORMAT_BGRX1010102, .modifiers = {DRM_FORMAT_MOD_LINEAR}},
-            SDRMFormat{.drmFormat = DRM_FORMAT_ARGB2101010, .modifiers = {DRM_FORMAT_MOD_LINEAR}},
-            SDRMFormat{.drmFormat = DRM_FORMAT_ABGR2101010, .modifiers = {DRM_FORMAT_MOD_LINEAR}},
-            SDRMFormat{.drmFormat = DRM_FORMAT_RGBA1010102, .modifiers = {DRM_FORMAT_MOD_LINEAR}},
-            SDRMFormat{.drmFormat = DRM_FORMAT_BGRA1010102, .modifiers = {DRM_FORMAT_MOD_LINEAR}}};
-}
-
-std::vector<SDRMFormat> Aquamarine::CTabBackend::getCursorFormats() {
-    return {};
-}
-
-bool Aquamarine::CTabBackend::createOutput(const TabMonitorInfo* monitor_info) {
-    auto output = SP<CTabOutput>(new CTabOutput(*monitor_info, self));
-    output->self = output;
-    outputs.emplace_back(output);
-
-    backend.lock()->events.newOutput.emit(output);
-
-    return true;
-}
-
-SP<IAllocator> Aquamarine::CTabBackend::preferredAllocator() {
-    return nullptr;
-}
-
-std::vector<SP<IAllocator>> Aquamarine::CTabBackend::getAllocators() {
-    return {};
-}
-
-CWeakPointer<IBackendImplementation> Aquamarine::CTabBackend::getPrimary() {
-    return self;
 }
