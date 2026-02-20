@@ -6,11 +6,16 @@
 #include "aquamarine/input/Input.hpp"
 #include "aquamarine/output/Output.hpp"
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <drm_fourcc.h>
+#include <fcntl.h>
 #include <format>
 #include <optional>
+#include <poll.h>
+#include <unordered_set>
 #include <ctime>
+#include <tracy/Tracy.hpp>
 #include <unistd.h>
 
 using namespace Aquamarine;
@@ -115,8 +120,6 @@ class CTabBuffer : public IBuffer {
     }
 
     ~CTabBuffer() override {
-        if (target.dmabuf.fd >= 0)
-            close(target.dmabuf.fd);
     }
 
     eBufferType type() override {
@@ -149,7 +152,7 @@ class CTabBuffer : public IBuffer {
     }
 
     bool isSynchronous() override {
-        return false;
+        return true;
     }
 
   private:
@@ -171,6 +174,7 @@ class CTabSwapchain : public ISwapchain {
     }
 
     CSharedPointer<IBuffer> next(int* age) override {
+        ZoneScopedN("CTabSwapchain::next");
         if (age)
             *age = 0;
         if (!client)
@@ -181,7 +185,14 @@ class CTabSwapchain : public ISwapchain {
         if (res != TAB_ACQUIRE_OK)
             return nullptr;
 
-        pending = target.dmabuf.fd >= 0;
+        if (target.dmabuf.fd < 0 || target.buffer_index > 1)
+            return nullptr;
+        if (busy[target.buffer_index])
+            return nullptr;
+
+        pendingIndex = target.buffer_index;
+        const auto txt = std::format("Acquired Buffer [{}]", target.buffer_index);
+        ZoneText(txt.c_str(), txt.size());
         return CSharedPointer<IBuffer>(new CTabBuffer(target));
     }
 
@@ -190,20 +201,46 @@ class CTabSwapchain : public ISwapchain {
     }
 
     void rollback() override {
-        pending = false;
+        pendingIndex.reset();
     }
 
-    bool takePending() {
-        bool had = pending;
-        pending  = false;
-        return had;
+    std::optional<uint32_t> takePendingIndex() {
+        auto out = pendingIndex;
+        pendingIndex.reset();
+        return out;
+    }
+
+    bool markBusy(uint32_t index) {
+        if (index > 1)
+            return false;
+        busy[index] = true;
+        return true;
+    }
+
+    bool release(uint32_t index) {
+        ZoneScopedN("CTabSwapchain::release");
+        if (index > 1)
+            return false;
+        busy[index] = false;
+        const auto txt = std::format("Released Buffer [{}]", index);
+        ZoneText(txt.c_str(), txt.size());
+        return true;
+    }
+
+    bool hasAvailableBuffer() const {
+        return !busy[0] || !busy[1];
+    }
+
+    int busyCount() const {
+        return (int)busy[0] + (int)busy[1];
     }
 
   private:
     TabClientHandle*  client = nullptr;
     std::string       monitorID;
     SSwapchainOptions options;
-    bool              pending = false;
+    std::optional<uint32_t> pendingIndex;
+    std::array<bool, 2>     busy = {false, false};
 
     friend class CTabOutput;
 };
@@ -222,8 +259,21 @@ CTabOutput::CTabOutput(const TabMonitorInfo& monitor_info, CWeakPointer<CTabBack
         new SOutputMode({.pixelSize = {double(monitor_info.width), double(monitor_info.height)}, .refreshRate = refreshmHz, .preferred = true}));
     modes.emplace_back(mode);
     state->setMode(mode);
-
+    tracyPlotName = std::format("Awaiting Frame on {}", name);
+    TracyPlotConfig(this->tracyPlotName.c_str(), tracy::PlotFormatType::Number, true, true, 0);
     swapchain = CSharedPointer<ISwapchain>(new CTabSwapchain(monitor_info, backend.lock()->ensureClient()));
+
+    frameIdle = makeShared<std::function<void(void)>>([this]() {
+        ZoneScopedN("frameIdle callback");
+        ZoneName(name.c_str(), name.size());
+        frameEventScheduled = false;
+        auto sc = dynamicPointerCast<CTabSwapchain>(swapchain);
+        TracyPlot(tracyPlotName.c_str(), sc ? (int64_t)sc->busyCount() : 0);
+        if (sc && !sc->hasAvailableBuffer()) {
+            return;
+        }
+        events.frame.emit();
+    });
 }
 
 CTabOutput::~CTabOutput() {
@@ -231,7 +281,12 @@ CTabOutput::~CTabOutput() {
 }
 
 bool CTabOutput::commit() {
+    ZoneScoped;
+    TracyMessage("Hyprland Commit Start", 21);
     events.commit.emit();
+    const auto committedState = state->state();
+    const auto committedMask  = committedState.committed;
+    const auto explicitFence  = committedState.explicitInFence;
     state->onCommit();
     needsFrame = false;
     auto be = backend.lock();
@@ -243,11 +298,25 @@ bool CTabOutput::commit() {
         return true;
 
     if (auto client = be->ensureClient()) {
-        const bool sent = sc->takePending();
-        if (sent)
-            tab_client_swap_buffers(client, monitorID.c_str());
-        if (sent)
-            awaitingFrameDone = true;
+        auto pending = sc->takePendingIndex();
+        if (!pending.has_value())
+            return true;
+
+        sc->markBusy(*pending);
+        int acquireFenceFD = -1;
+        const bool hasExplicitFence = (committedMask & COutputState::eOutputStateProperties::AQ_OUTPUT_STATE_EXPLICIT_IN_FENCE) && explicitFence >= 0;
+        if (hasExplicitFence) {
+            acquireFenceFD = fcntl(explicitFence, F_DUPFD_CLOEXEC, 0);
+            if (acquireFenceFD < 0) {
+                if (auto core = be->backend.lock())
+                    core->log(AQ_LOG_WARNING, std::format("tab backend: failed to dup explicit in-fence for {} (fd {}), falling back to no fence", monitorID, explicitFence));
+            }
+        }
+        const bool sent = tab_client_request_buffer(client, monitorID.c_str(), acquireFenceFD);
+        if (acquireFenceFD >= 0)
+            close(acquireFenceFD);
+        if (!sent)
+            sc->release(*pending);
     }
 
     return true;
@@ -262,8 +331,12 @@ SP<IBackendImplementation> CTabOutput::getBackend() {
 }
 
 void CTabOutput::scheduleFrame(const scheduleFrameReason) {
+    ZoneScoped;
+    ZoneNameF("scheduleFrame %s", self->name.c_str());
     needsFrame = true;
-    if (awaitingFrameDone || frameEventScheduled)
+    auto sc = dynamicPointerCast<CTabSwapchain>(swapchain);
+    TracyPlot(tracyPlotName.c_str(), sc ? (int64_t)sc->busyCount() : 0);
+    if (frameEventScheduled || (sc && !sc->hasAvailableBuffer()))
         return;
     frameEventScheduled = true;
 
@@ -295,6 +368,13 @@ CTabBackend::CTabBackend(CSharedPointer<CBackend> backend_) : backend(backend_) 
 }
 
 CTabBackend::~CTabBackend() {
+    for (auto& pending : pendingSwaps) {
+        if (pending.fenceFD >= 0)
+            close(pending.fenceFD);
+        pending.fenceFD = -1;
+    }
+    pendingSwaps.clear();
+
     if (client) {
         tab_client_disconnect(client);
         client = nullptr;
@@ -318,6 +398,76 @@ CTabOutput* CTabBackend::findOutputByID(const std::string& id) {
     return nullptr;
 }
 
+bool CTabBackend::isFenceSignaled(int fd) const {
+    if (fd < 0)
+        return true;
+
+    pollfd pfd {
+        .fd     = fd,
+        .events = POLLIN | POLLERR | POLLHUP,
+    };
+
+    if (poll(&pfd, 1, 0) <= 0)
+        return false;
+
+    return pfd.revents & (POLLIN | POLLERR | POLLHUP | POLLNVAL);
+}
+
+void CTabBackend::queuePendingSwap(SPendingSwap&& pending) {
+    pendingSwaps.emplace_back(std::move(pending));
+    if (auto core = backend.lock())
+        core->events.pollFDsChanged.emit();
+}
+
+void CTabBackend::flushPendingSwaps() {
+    ZoneScopedN("CTabBackend::flushPendingSwaps");
+    if (!client || pendingSwaps.empty())
+        return;
+
+    bool                    changed = false;
+    std::unordered_set<std::string> blockedMonitors;
+
+    for (size_t i = 0; i < pendingSwaps.size();) {
+        auto& pending = pendingSwaps[i];
+        if (blockedMonitors.contains(pending.monitorID)) {
+            ++i;
+            continue;
+        }
+
+        if (!isFenceSignaled(pending.fenceFD)) {
+            blockedMonitors.emplace(pending.monitorID);
+            ++i;
+            continue;
+        }
+
+        if (pending.fenceFD >= 0)
+            close(pending.fenceFD);
+
+        const auto fenceReleasedMsg = std::format("Fence Released [{}] Buffer [{}]", pending.monitorID, pending.bufferIndex);
+        ZoneText(fenceReleasedMsg.c_str(), fenceReleasedMsg.size());
+        TracyMessage(fenceReleasedMsg.c_str(), fenceReleasedMsg.size());
+
+        const bool sent = tab_client_request_buffer(client, pending.monitorID.c_str(), -1);
+        if (!sent) {
+            if (auto output = findOutputByID(pending.monitorID)) {
+                if (auto sc = dynamicPointerCast<CTabSwapchain>(output->swapchain))
+                    sc->release(pending.bufferIndex);
+            }
+            if (auto core = backend.lock()) {
+                core->log(AQ_LOG_WARNING, std::format("tab backend: failed to send deferred buffer_request for {} buffer {}", pending.monitorID, pending.bufferIndex));
+            }
+        }
+
+        pendingSwaps.erase(pendingSwaps.begin() + i);
+        changed = true;
+    }
+
+    if (changed) {
+        if (auto core = backend.lock())
+            core->events.pollFDsChanged.emit();
+    }
+}
+
 eBackendType CTabBackend::type() {
     return eBackendType::AQ_BACKEND_TAB;
 }
@@ -325,6 +475,8 @@ eBackendType CTabBackend::type() {
 bool CTabBackend::start() {
     if (!ensureClient())
         return false;
+
+    tracy::SetThreadName("AquamarineMain");
 
     auto core = backend.lock();
     if (core)
@@ -348,12 +500,23 @@ bool CTabBackend::start() {
 }
 
 std::vector<CSharedPointer<SPollFD>> CTabBackend::pollFDs() {
-    if (!client)
-        return {};
-    const int fd = tab_client_get_socket_fd(client);
-    if (fd < 0)
-        return {};
-    return {CSharedPointer<SPollFD>(new SPollFD{.fd = fd, .onSignal = [this]() { dispatchEvents(); }})};
+    std::vector<CSharedPointer<SPollFD>> fds;
+
+    if (client) {
+        const int socketFD = tab_client_get_socket_fd(client);
+        if (socketFD >= 0)
+            fds.emplace_back(CSharedPointer<SPollFD>(new SPollFD{.fd = socketFD, .onSignal = [this]() { dispatchEvents(); }}));
+    }
+
+#if WAIT_FOR_FENCE
+    for (const auto& pending : pendingSwaps) {
+        if (pending.fenceFD < 0)
+            continue;
+        fds.emplace_back(CSharedPointer<SPollFD>(new SPollFD{.fd = pending.fenceFD, .onSignal = [this]() { dispatchEvents(); }}));
+    }
+#endif
+
+    return fds;
 }
 
 int CTabBackend::drmFD() {
@@ -365,21 +528,29 @@ int CTabBackend::drmRenderNodeFD() {
 }
 
 bool CTabBackend::dispatchEvents() {
+    ZoneScoped;
     if (!client)
         return true;
 
+#if WAIT_FOR_FENCE
+    flushPendingSwaps();
+#endif
     tab_client_poll_events(client);
+    TracyMessage("Socket Polled", 13);
 
     TabEvent event {};
     while (tab_client_next_event(client, &event)) {
         switch (event.event_type) {
-            case TAB_EVENT_FRAME_DONE: {
-                if (event.data.frame_done) {
-                    std::string id(event.data.frame_done);
+            case TAB_EVENT_BUFFER_RELEASED: {
+                TracyMessage("IPC BufferRelease Received", 28);
+                if (event.data.buffer_released.monitor_id) {
+                    std::string id(event.data.buffer_released.monitor_id);
+                    const auto  bufferIndex = event.data.buffer_released.buffer_index;
                     if (auto output = findOutputByID(id)) {
-                        if (!output->awaitingFrameDone) {
-                            break;
-                        }
+                        auto sc = dynamicPointerCast<CTabSwapchain>(output->swapchain);
+                        if (sc)
+                            sc->release(bufferIndex);
+                        TracyPlot(output->tracyPlotName.c_str(), sc ? (int64_t)sc->busyCount() : 0);
                         timespec now {};
                         clock_gettime(CLOCK_MONOTONIC, &now);
                         output->lastPresentTime = now;
@@ -390,15 +561,14 @@ bool CTabBackend::dispatchEvents() {
                             .refresh   = output->refreshIntervalNs,
                             .flags     = IOutput::AQ_OUTPUT_PRESENT_VSYNC,
                         });
-                        output->awaitingFrameDone = false;
-                        if (output->needsFrame && !output->frameEventScheduled) {
+                        if (output->needsFrame && !output->frameEventScheduled && (!sc || sc->hasAvailableBuffer())) {
                             output->scheduleFrame(IOutput::AQ_SCHEDULE_NEEDS_FRAME);
                         }
                     } else if (auto core = backend.lock()) {
-                        core->log(AQ_LOG_WARNING, std::format("tab frame_done for unknown monitor {}", id));
+                        core->log(AQ_LOG_WARNING, std::format("tab buffer_release for unknown monitor {}", id));
                     }
                 } else if (auto core = backend.lock()) {
-                    core->log(AQ_LOG_WARNING, "tab frame_done event with null monitor id");
+                    core->log(AQ_LOG_WARNING, "tab buffer_release event with null monitor id");
                 }
                 break;
             }
@@ -438,6 +608,9 @@ bool CTabBackend::dispatchEvents() {
         }
         tab_client_free_event_strings(&event);
     }
+#if WAIT_FOR_FENCE
+    flushPendingSwaps();
+#endif
     return true;
 }
 
@@ -473,15 +646,6 @@ std::vector<SDRMFormat> CTabBackend::getCursorFormats() {
 bool CTabBackend::createOutput(const TabMonitorInfo& monitor_info) {
     auto output = CSharedPointer<CTabOutput>(new CTabOutput(monitor_info, self));
     output->self = output;
-    output->frameIdle = makeShared<std::function<void(void)>>([w = output->self]() {
-        if (auto o = w.lock()) {
-            o->frameEventScheduled = false;
-            if (o->awaitingFrameDone) {
-                return;
-            }
-            o->events.frame.emit();
-        }
-    });
     outputs.emplace_back(output);
     if (auto core = backend.lock())
         core->events.newOutput.emit(output);
