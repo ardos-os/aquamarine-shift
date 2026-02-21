@@ -5,7 +5,10 @@
 #include "../output/Output.hpp"
 #include <hyprutils/memory/WeakPtr.hpp>
 #include <tab_client.h>
+#include <optional>
+#include <vector>
 #include <ctime>
+#include <string>
 
 namespace Aquamarine {
     class CBackend;
@@ -28,7 +31,7 @@ namespace Aquamarine {
         void                                                      scheduleFrame(const scheduleFrameReason reason = AQ_SCHEDULE_UNKNOWN) override;
         bool                                                      destroy() override;
         std::vector<SDRMFormat>                                   getRenderFormats() override;
-
+        std::string tracyPlotName;
         Hyprutils::Memory::CWeakPointer<CTabOutput> self;
 
       private:
@@ -41,7 +44,6 @@ namespace Aquamarine {
         timespec                                     lastPresentTime {};
         uint32_t                                     presentSeq = 0;
         bool                                         frameEventScheduled = false;
-        bool                                         awaitingFrameDone = false;
         Hyprutils::Memory::CSharedPointer<std::function<void(void)>> frameIdle;
 
         friend class CTabBackend;
@@ -73,8 +75,15 @@ namespace Aquamarine {
         Hyprutils::Memory::CWeakPointer<CTabBackend> self;
 
       private:
+        struct SPendingRelease {
+            std::string monitorID;
+            uint32_t    bufferIndex = 0;
+            int         releaseFenceFD = -1;
+        };
+
         Hyprutils::Memory::CWeakPointer<CBackend>                  backend;
         std::vector<Hyprutils::Memory::CSharedPointer<CTabOutput>> outputs;
+        std::vector<SPendingRelease>                               pendingReleases;
         TabClientHandle*                                           client = nullptr;
 
         Hyprutils::Memory::CSharedPointer<IKeyboard>   keyboard;
@@ -86,6 +95,9 @@ namespace Aquamarine {
 
         TabClientHandle* ensureClient();
         CTabOutput*      findOutputByID(const std::string& id);
+        bool             isFenceSignaled(int fd) const;
+        void             queuePendingRelease(SPendingRelease&& pending);
+        void             flushPendingReleases();
 
         friend class CTabOutput;
     };
