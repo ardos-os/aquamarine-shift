@@ -402,7 +402,7 @@ TabClientHandle* CTabBackend::ensureClient() {
     return client;
 }
 
-CTabOutput* CTabBackend::findOutputByID(const std::string& id) {
+CTabOutput* CTabBackend::findOutputByID(std::string_view id) {
     for (auto& output : outputs)
         if (output->monitorID == id)
             return output.get();
@@ -426,12 +426,13 @@ bool CTabBackend::isFenceSignaled(int fd) const {
 
 void CTabBackend::queuePendingRelease(SPendingRelease&& pending) {
     pendingReleases.emplace_back(std::move(pending));
-    if (auto core = backend.lock())
-        core->events.pollFDsChanged.emit();
 }
 
 void CTabBackend::flushPendingReleases() {
     ZoneScopedN("CTabBackend::flushPendingReleases");
+    if (pendingReleases.empty())
+        return;
+
     bool changed = false;
 
     auto releaseNow = [this](const std::string& id, uint32_t bufferIndex) {
@@ -464,12 +465,21 @@ void CTabBackend::flushPendingReleases() {
             ++i;
             continue;
         }
+        char msg[192];
+        int  msgLen = snprintf(msg, sizeof(msg), "Release fence signaled %s[%u]", pending.monitorID.c_str(), pending.bufferIndex);
+        if (msgLen > 0)
+            TracyMessage(msg, (size_t)std::min(msgLen, (int)sizeof(msg) - 1));
         if (pending.releaseFenceFD >= 0) {
             close(pending.releaseFenceFD);
             pending.releaseFenceFD = -1;
         }
+        msgLen = snprintf(msg, sizeof(msg), "Release buffer %s[%u]", pending.monitorID.c_str(), pending.bufferIndex);
+        if (msgLen > 0)
+            TracyMessage(msg, (size_t)std::min(msgLen, (int)sizeof(msg) - 1));
         releaseNow(pending.monitorID, pending.bufferIndex);
-        pendingReleases.erase(pendingReleases.begin() + i);
+        if (i + 1 != pendingReleases.size())
+            pendingReleases[i] = std::move(pendingReleases.back());
+        pendingReleases.pop_back();
         changed = true;
     }
 
@@ -487,7 +497,9 @@ bool CTabBackend::start() {
     if (!ensureClient())
         return false;
 
+#ifdef TRACY_ENABLE
     tracy::SetThreadName("AquamarineMain");
+#endif
 
     auto core = backend.lock();
     if (core)
@@ -520,7 +532,7 @@ std::vector<CSharedPointer<SPollFD>> CTabBackend::pollFDs() {
     }
     for (const auto& pending : pendingReleases) {
         if (pending.releaseFenceFD >= 0)
-            fds.emplace_back(CSharedPointer<SPollFD>(new SPollFD{.fd = pending.releaseFenceFD, .onSignal = [this]() { dispatchEvents(); }}));
+            fds.emplace_back(CSharedPointer<SPollFD>(new SPollFD{.fd = pending.releaseFenceFD, .onSignal = [this]() { flushPendingReleases(); }}));
     }
 
     return fds;
@@ -538,89 +550,94 @@ bool CTabBackend::dispatchEvents() {
     ZoneScoped;
     if (!client)
         return true;
-    flushPendingReleases();
-    tab_client_poll_events(client);
+    {
+        ZoneScopedN("CTabBackend::dispatchEvents::tab_client_poll_events");
+        tab_client_poll_events(client);
+    }
     TracyMessage("Socket Polled", 13);
 
     TabEvent event {};
-    while (tab_client_next_event(client, &event)) {
-        switch (event.event_type) {
-            case TAB_EVENT_BUFFER_RELEASED: {
-                TracyMessage("IPC BufferRelease Received", 28);
-                if (event.data.buffer_released.monitor_id) {
-                    std::string id(event.data.buffer_released.monitor_id);
-                    const auto  bufferIndex = event.data.buffer_released.buffer_index;
-                    const int releaseFenceFD = event.data.buffer_released.release_fence_fd;
-                    if (releaseFenceFD >= 0) {
-                        queuePendingRelease(SPendingRelease{
-                            .monitorID = id,
-                            .bufferIndex = bufferIndex,
-                            .releaseFenceFD = releaseFenceFD,
-                        });
-                        event.data.buffer_released.release_fence_fd = -1;
-                    } else {
-                        if (auto output = findOutputByID(id)) {
-                            auto sc = dynamicPointerCast<CTabSwapchain>(output->swapchain);
-                            if (sc)
-                                sc->release(bufferIndex);
-                            TracyPlot(output->tracyPlotName.c_str(), sc ? (int64_t)sc->busyCount() : 0);
-                            timespec now {};
-                            clock_gettime(CLOCK_MONOTONIC, &now);
-                            output->lastPresentTime = now;
-                            output->events.present.emit(IOutput::SPresentEvent{
-                                .presented = true,
-                                .when      = &output->lastPresentTime,
-                                .seq       = ++output->presentSeq,
-                                .refresh   = output->refreshIntervalNs,
-                                .flags     = IOutput::AQ_OUTPUT_PRESENT_VSYNC,
+    size_t   handledEvents = 0;
+    bool     queuedFenceRelease = false;
+    {
+        ZoneScopedN("CTabBackend::dispatchEvents::next_event_loop");
+        for (;;) {
+            bool hasEvent = false;
+            {
+                ZoneScopedN("CTabBackend::dispatchEvents::next_event_pop");
+                hasEvent = tab_client_next_event(client, &event);
+            }
+            if (!hasEvent)
+                break;
+            handledEvents++;
+            {
+                ZoneScopedN("CTabBackend::dispatchEvents::next_event_process");
+                switch (event.event_type) {
+                    case TAB_EVENT_BUFFER_RELEASED: {
+                        if (event.data.buffer_released.monitor_id) {
+                            const char* monitorID = event.data.buffer_released.monitor_id;
+                            const auto  bufferIndex = event.data.buffer_released.buffer_index;
+                            const int   releaseFenceFD = event.data.buffer_released.release_fence_fd;
+                            if (releaseFenceFD >= 0)
+                                queuedFenceRelease = true;
+                            queuePendingRelease(SPendingRelease{
+                                .monitorID = std::string(monitorID),
+                                .bufferIndex = bufferIndex,
+                                .releaseFenceFD = releaseFenceFD >= 0 ? releaseFenceFD : -1,
                             });
-                            if (output->needsFrame && !output->frameEventScheduled && (!sc || sc->hasAvailableBuffer())) {
-                                output->scheduleFrame(IOutput::AQ_SCHEDULE_NEEDS_FRAME);
-                            }
+                            event.data.buffer_released.release_fence_fd = -1;
                         } else if (auto core = backend.lock()) {
-                            core->log(AQ_LOG_WARNING, std::format("tab buffer_release for unknown monitor {}", id));
+                            core->log(AQ_LOG_WARNING, "tab buffer_release event with null monitor id");
                         }
+                        break;
                     }
-                } else if (auto core = backend.lock()) {
-                    core->log(AQ_LOG_WARNING, "tab buffer_release event with null monitor id");
-                }
-                break;
-            }
-            case TAB_EVENT_MONITOR_ADDED: {
-                createOutput(event.data.monitor_added);
-                break;
-            }
-            case TAB_EVENT_MONITOR_REMOVED: {
-                if (event.data.monitor_removed) {
-                    std::string id(event.data.monitor_removed);
-                    std::erase_if(outputs, [&](const auto& other) {
-                        if (other->monitorID == id) {
-                            other->destroy();
-                            return true;
+                    case TAB_EVENT_MONITOR_ADDED: {
+                        createOutput(event.data.monitor_added);
+                        break;
+                    }
+                    case TAB_EVENT_MONITOR_REMOVED: {
+                        if (event.data.monitor_removed) {
+                            std::string id(event.data.monitor_removed);
+                            std::erase_if(outputs, [&](const auto& other) {
+                                if (other->monitorID == id) {
+                                    other->destroy();
+                                    return true;
+                                }
+                                return false;
+                            });
                         }
-                        return false;
-                    });
+                        break;
+                    }
+                    case TAB_EVENT_INPUT: {
+                        bool pointerDirty = false;
+                        bool touchDirty   = false;
+                        handleInput(&event.data.input, pointerDirty, touchDirty);
+                        if (pointerDirty && pointer)
+                            pointer->events.frame.emit();
+                        if (touchDirty && touch)
+                            touch->events.frame.emit();
+                        break;
+                    }
+                    default: {
+                        if (auto core = backend.lock())
+                            core->log(AQ_LOG_DEBUG,
+                                      std::format("tab backend: unhandled event {}", (int)event.event_type));
+                        break;
+                    }
                 }
-                break;
             }
-            case TAB_EVENT_INPUT: {
-                bool pointerDirty = false;
-                bool touchDirty   = false;
-                handleInput(&event.data.input, pointerDirty, touchDirty);
-                if (pointerDirty && pointer)
-                    pointer->events.frame.emit();
-                if (touchDirty && touch)
-                    touch->events.frame.emit();
-                break;
-            }
-            default: {
-                if (auto core = backend.lock())
-                    core->log(AQ_LOG_DEBUG,
-                              std::format("tab backend: unhandled event {}", (int)event.event_type));
-                break;
-            }
+            tab_client_free_event_strings(&event);
         }
-        tab_client_free_event_strings(&event);
+    }
+    {
+        char msg[96];
+        const int msgLen = snprintf(msg, sizeof(msg), "tab events handled: %zu", handledEvents);
+        if (msgLen > 0)
+            TracyMessage(msg, (size_t)std::min(msgLen, (int)sizeof(msg) - 1));
+    }
+    if (queuedFenceRelease) {
+        if (auto core = backend.lock())
+            core->events.pollFDsChanged.emit();
     }
     flushPendingReleases();
     return true;

@@ -53,6 +53,7 @@ endif()
 configure_file(aquamarine.pc.in aquamarine.pc @ONLY)
 
 set(CMAKE_CXX_STANDARD 23)
+option(AQUAMARINE_TRACY_USE_HOST_CLIENT "Do not link local tracy client; resolve tracy symbols from host process" OFF)
 add_compile_options(
   -Wall
   -Wextra
@@ -148,7 +149,7 @@ configure_file(data/hwdata.hpp.in hwdata.hpp @ONLY)
 # tests
 add_custom_target(tests)
 
-add_executable(simpleWindow "tests/SimpleWindow.cpp")
+add_executable(simpleWindow EXCLUDE_FROM_ALL "tests/SimpleWindow.cpp")
 target_link_libraries(simpleWindow PRIVATE PkgConfig::deps aquamarine)
 add_test(
   NAME "simpleWindow"
@@ -156,13 +157,32 @@ add_test(
   COMMAND simpleWindow "simpleWindow")
 add_dependencies(tests simpleWindow)
 
-add_executable(attachments "tests/Attachments.cpp")
+add_executable(attachments EXCLUDE_FROM_ALL "tests/Attachments.cpp")
 target_link_libraries(attachments PRIVATE PkgConfig::deps aquamarine)
 add_test(
   NAME "attachments"
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tests
   COMMAND attachments "attachments")
 add_dependencies(tests attachments)
+
+if(AQUAMARINE_TRACY_USE_HOST_CLIENT)
+  if(TARGET aquamarine AND TARGET aquamarine_tracy_client)
+    get_target_property(_link_libs aquamarine LINK_LIBRARIES)
+    if(_link_libs)
+      list(REMOVE_ITEM _link_libs aquamarine_tracy_client)
+      set_target_properties(aquamarine PROPERTIES LINK_LIBRARIES "${_link_libs}")
+    endif()
+  endif()
+
+  target_compile_definitions(aquamarine PUBLIC TRACY_ENABLE TRACY_IMPORTS)
+  target_include_directories(aquamarine PRIVATE "${CMAKE_BINARY_DIR}/_deps/tracy-src/public")
+
+  if(TARGET aquamarine_tracy_client)
+    target_link_libraries(simpleWindow PRIVATE aquamarine_tracy_client)
+    target_link_libraries(attachments PRIVATE aquamarine_tracy_client)
+  endif()
+  message(STATUS "aquamarine: using Tracy symbols from host process (no local TracyClient link)")
+endif()
 
 # Installation
 install(TARGETS aquamarine)

@@ -9,6 +9,7 @@
 #include <vector>
 #include <ctime>
 #include <string>
+#include <string_view>
 
 namespace Aquamarine {
     class CBackend;
@@ -94,7 +95,7 @@ namespace Aquamarine {
         Hyprutils::Memory::CSharedPointer<ISwitch>     switchDev;
 
         TabClientHandle* ensureClient();
-        CTabOutput*      findOutputByID(const std::string& id);
+        CTabOutput*      findOutputByID(std::string_view id);
         bool             isFenceSignaled(int fd) const;
         void             queuePendingRelease(SPendingRelease&& pending);
         void             flushPendingReleases();
