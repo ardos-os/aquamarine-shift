@@ -86,6 +86,7 @@ namespace Aquamarine {
         std::vector<Hyprutils::Memory::CSharedPointer<CTabOutput>> outputs;
         std::vector<SPendingRelease>                               pendingReleases;
         TabClientHandle*                                           client = nullptr;
+        bool                                                       sessionAwake = true;
 
         Hyprutils::Memory::CSharedPointer<IKeyboard>   keyboard;
         Hyprutils::Memory::CSharedPointer<IPointer>    pointer;

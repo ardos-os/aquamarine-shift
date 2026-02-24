@@ -24,6 +24,17 @@ using namespace Hyprutils::Math;
 
 namespace {
 
+std::optional<std::string> takeClientError(TabClientHandle* client) {
+    if (!client)
+        return std::nullopt;
+    char* err = tab_client_take_error(client);
+    if (!err)
+        return std::nullopt;
+    std::string out(err);
+    tab_client_string_free(err);
+    return out;
+}
+
 class CTabKeyboard : public IKeyboard {
   public:
     const std::string& getName() override {
@@ -315,6 +326,11 @@ bool CTabOutput::commit() {
         if (!pending.has_value())
             return true;
 
+        if (!be->sessionAwake) {
+            sc->release(*pending);
+            return true;
+        }
+
         sc->markBusy(*pending);
         int acquireFenceFD = -1;
         const bool hasExplicitFence = (committedMask & COutputState::eOutputStateProperties::AQ_OUTPUT_STATE_EXPLICIT_IN_FENCE) && explicitFence >= 0;
@@ -328,8 +344,19 @@ bool CTabOutput::commit() {
         const bool sent = tab_client_request_buffer(client, monitorID.c_str(), acquireFenceFD);
         if (acquireFenceFD >= 0)
             close(acquireFenceFD);
-        if (!sent)
+        if (!sent) {
+            if (auto core = be->backend.lock()) {
+                if (auto err = takeClientError(client)) {
+                    if (err->find("session_sleeping") != std::string::npos)
+                        core->log(AQ_LOG_DEBUG, std::format("tab backend: dropped frame for sleeping session on {}", monitorID));
+                    else
+                        core->log(AQ_LOG_WARNING, std::format("tab backend: request_buffer failed for {}: {}", monitorID, *err));
+                } else {
+                    core->log(AQ_LOG_WARNING, std::format("tab backend: request_buffer failed for {}", monitorID));
+                }
+            }
             sc->release(*pending);
+        }
     }
 
     return true;
@@ -554,6 +581,14 @@ bool CTabBackend::dispatchEvents() {
         ZoneScopedN("CTabBackend::dispatchEvents::tab_client_poll_events");
         tab_client_poll_events(client);
     }
+    if (auto err = takeClientError(client)) {
+        if (auto core = backend.lock()) {
+            if (err->find("session_sleeping") != std::string::npos)
+                core->log(AQ_LOG_DEBUG, std::format("tab backend: {}", *err));
+            else
+                core->log(AQ_LOG_WARNING, std::format("tab backend: poll error: {}", *err));
+        }
+    }
     TracyMessage("Socket Polled", 13);
 
     TabEvent event {};
@@ -608,6 +643,43 @@ bool CTabBackend::dispatchEvents() {
                         }
                         break;
                     }
+                    case TAB_EVENT_SESSION_AWAKE: {
+                        sessionAwake = true;
+                        if (auto core = backend.lock())
+                            core->log(AQ_LOG_DEBUG, "tab backend: session_awake");
+                        for (auto& output : outputs) {
+                            if (output)
+                                output->scheduleFrame(IOutput::AQ_SCHEDULE_NEEDS_FRAME);
+                        }
+                        break;
+                    }
+                    case TAB_EVENT_SESSION_SLEEP: {
+                        sessionAwake = false;
+                        if (auto core = backend.lock())
+                            core->log(AQ_LOG_DEBUG, "tab backend: session_sleep");
+                        break;
+                    }
+                    case TAB_EVENT_SESSION_ACTIVE: {
+                        if (event.data.session_active) {
+                            if (auto core = backend.lock())
+                                core->log(AQ_LOG_DEBUG, std::format("tab backend: session_active {}", event.data.session_active));
+                            for (auto& output : outputs) {
+                                if (output)
+                                    output->scheduleFrame(IOutput::AQ_SCHEDULE_NEEDS_FRAME);
+                            }
+                        }
+                        break;
+                    }
+                    case TAB_EVENT_SESSION_STATE: {
+                        const auto& session = event.data.session_state;
+                        if (auto core = backend.lock()) {
+                            core->log(AQ_LOG_DEBUG,
+                                      std::format("tab backend: session_state id={} state={}",
+                                                  session.id ? session.id : "<null>",
+                                                  (int)session.state));
+                        }
+                        break;
+                    }
                     case TAB_EVENT_INPUT: {
                         bool pointerDirty = false;
                         bool touchDirty   = false;
@@ -652,7 +724,16 @@ bool CTabBackend::setCursor(SP<IBuffer>, const Vector2D&) {
 }
 
 void CTabBackend::onReady() {
-    ;
+    if (!client)
+        return;
+    if (!tab_client_send_ready(client)) {
+        if (auto core = backend.lock()) {
+            if (auto err = takeClientError(client))
+                core->log(AQ_LOG_WARNING, std::format("tab backend: failed to send session_ready: {}", *err));
+            else
+                core->log(AQ_LOG_WARNING, "tab backend: failed to send session_ready");
+        }
+    }
 }
 
 std::vector<SDRMFormat> CTabBackend::getRenderFormats() {
