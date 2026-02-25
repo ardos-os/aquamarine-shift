@@ -1,9 +1,9 @@
 
 ## Aquamarine (Shift fork)
 
-**aquamarine-shift** is a fork of Aquamarine adapted for use by [**Shift**](https://github.com/hyprside/shift) and **Hyprside**.
+**aquamarine-shift** is a fork of Aquamarine adapted for use by [**Shift**](https://github.com/ardos/shift) and **Ardos OS**.
 
-It extends Aquamarine with a **Tab backend**, allowing [hyprde-wm](https://github.com/hyprside/hyprde-wm) to connect to shift without having to change almost anything in the original hyprland code.
+It extends Aquamarine with a **Tab backend**, allowing [ardos-wm](https://github.com/ardos/ardos-wm) to connect to shift without having to change almost anything in the original hyprland code.
 
 This fork is **not compatible with upstream Aquamarine users** and is **not intended as a general-purpose replacement**.
 
@@ -41,7 +41,7 @@ This fork introduces functionality required by Shift:
 This fork is intended to be used **only** by:
 
 - **Shift**
-- **Hyprside**
+- **Ardos OS**
 - Projects explicitly designed around Shift’s architecture
 
 If you are building a traditional Wayland compositor or desktop environment,
@@ -80,7 +80,7 @@ cmake --build ./build --config Release \
 * [x] Wayland backend
 * [x] DRM backend (DRM / KMS / libinput)
 * [x] Virtual backend (headless)
-* [x] **Tab backend (Shift / Hyprside)**
+* [x] **Tab backend (Shift / Ardos OS)**
 * [ ] Hardware plane support
 
 ---
